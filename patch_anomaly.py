@@ -54,10 +54,12 @@ def patch_grid(S: int, P: int, stride: int) -> np.ndarray:
     return np.arange(h, S - (P - h) + 1, stride)
 
 
-def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, add_stats: bool, add_pixels: bool = True):
+def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, add_stats: bool, add_pixels: bool = True,
+                    fmaps: np.ndarray = None):
     """Patches of slices idx whose centre lies in the gland.
     Returns descriptors (n, D) float32, slice index (n,), centre y, x (n,), position bin (n,),
-    per-channel patch means (n, C) (used by the smoothed raw-intensity baselines)."""
+    per-channel patch means (n, C) (used by the smoothed raw-intensity baselines).
+    With fmaps (N, D, h, w): the descriptor is the feature vector at the patch centre instead (HDnn / PatchCore)."""
     S = d["images"].shape[-1]
     cs = patch_grid(S, P, stride)
     h = P // 2
@@ -76,10 +78,16 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, add_stats: bo
         oy = cy[:, None] - h + np.arange(P)[None, :]
         ox = cx[:, None] - h + np.arange(P)[None, :]
         pat = img[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
-        parts = [pat.reshape(len(cy), -1)] if add_pixels else []
-        if add_stats:
-            parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
-        f = np.concatenate(parts, axis=1)
+        if fmaps is not None:
+            fh = fmaps.shape[-1]
+            fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
+            fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
+            f = fmaps[i][:, fy, fx].T.astype(np.float32)
+        else:
+            parts = [pat.reshape(len(cy), -1)] if add_pixels else []
+            if add_stats:
+                parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
+            f = np.concatenate(parts, axis=1)
         feats.append(f.astype(np.float32))
         means.append(pat.mean(axis=(2, 3)).astype(np.float32))
         sl.append(np.full(len(cy), i)); ys.append(cy); xs.append(cx)
@@ -103,32 +111,43 @@ class BinMemory:
         return faiss.IndexBinaryFlat(self.dim) if self.kind == "binary" else faiss.IndexFlatL2(self.dim)
 
     def add(self, X: np.ndarray, bins: np.ndarray):
+        self.ids = {}
+        self._X, self._all = X, np.arange(len(X))
         for b in np.unique(bins):
             ix = self._new()
             ix.add(np.ascontiguousarray(X[bins == b]))
             self.index[int(b)] = ix
+            self.ids[int(b)] = np.where(bins == b)[0]
 
-    def score(self, X: np.ndarray, bins: np.ndarray) -> np.ndarray:
-        out = np.full(len(X), np.nan, dtype=np.float64)
+    def knn(self, X: np.ndarray, bins: np.ndarray):
+        """Distances (n, k) (Hamming bits, or Euclidean) and global row ids (n, k) of the k nearest normals
+        in the query's own position bin."""
+        n = len(X)
+        D_out = np.zeros((n, self.k), np.float64)
+        I_out = np.zeros((n, self.k), np.int64)
         for b in np.unique(bins):
             m = bins == b
-            ix = self.index.get(int(b))
+            ix, ids = self.index.get(int(b)), self.ids.get(int(b))
             if ix is None:  # no normal reference at this position: fall back to all bins pooled
-                ix = self._pooled()
+                ix, ids = self._pooled(), self._all
             k = min(self.k, ix.ntotal)
-            D, _ = ix.search(np.ascontiguousarray(X[m]), k)
+            D, I = ix.search(np.ascontiguousarray(X[m]), k)
             D = D.astype(np.float64)
-            out[m] = (np.sqrt(np.maximum(D, 0)) if self.kind == "float" else D).mean(axis=1)
-        return out
+            if self.kind == "float":
+                D = np.sqrt(np.maximum(D, 0))
+            if k < self.k:  # pad by repeating the last neighbour
+                D = np.concatenate([D, np.repeat(D[:, -1:], self.k - k, 1)], 1)
+                I = np.concatenate([I, np.repeat(I[:, -1:], self.k - k, 1)], 1)
+            D_out[m], I_out[m] = D, ids[I]
+        return D_out, I_out
+
+    def score(self, X: np.ndarray, bins: np.ndarray) -> np.ndarray:
+        return self.knn(X, bins)[0].mean(axis=1)
 
     def _pooled(self):
         if not hasattr(self, "_pool"):
             self._pool = self._new()
-            for ix in self.index.values():
-                if self.kind == "binary":
-                    self._pool.add(np.vstack([ix.reconstruct(j) for j in range(ix.ntotal)]))
-                else:
-                    self._pool.add(ix.reconstruct_n(0, ix.ntotal))
+            self._pool.add(np.ascontiguousarray(self._X))
         return self._pool
 
 
@@ -258,13 +277,46 @@ def evaluate_maps(vols, settings, pool_size):
 # ---------------------------------------------------------------- main
 RAW = {"adc": lambda im: -im[:, 1], "hbv": lambda im: im[:, 2], "mix": lambda im: (im[:, 2] - im[:, 1]) / 2}
 RAW_M = {"adc": lambda M: -M[:, 1], "hbv": lambda M: M[:, 2], "mix": lambda M: (M[:, 2] - M[:, 1]) / 2}
+RESNET_LAYERS = {"resnet_l2": ("layer2",), "resnet_l3": ("layer3",), "resnet_l2l3": ("layer2", "layer3")}
+
+
+def resnet_feature_maps(images: np.ndarray, layers, cache: str = None, batch_size: int = 64) -> np.ndarray:
+    """HDnn / PatchCore-style local features: frozen ImageNet ResNet-18, the 3-channel crop (T2W, ADC, HBV as RGB)
+    upsampled to 224, layer2 (28 x 28, 128 ch) and/or layer3 (14 x 14, 256 ch, upsampled to 28 x 28),
+    3 x 3 average-pooled for local context (as in PatchCore). Returns (N, D, 28, 28) float16."""
+    if cache and os.path.exists(cache):
+        return np.load(cache)
+    import torch
+    import torch.nn.functional as F
+    from torchvision.models import resnet18, ResNet18_Weights
+    m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval()
+    outs = []
+    with torch.no_grad():
+        for i in range(0, len(images), batch_size):
+            x = torch.from_numpy(images[i:i + batch_size, :3].astype(np.float32))
+            x = F.interpolate(x, size=224, mode="bilinear", align_corners=False)
+            x = m.maxpool(m.relu(m.bn1(m.conv1(x))))
+            l2 = m.layer2(m.layer1(x))
+            feats = {"layer2": l2}
+            if "layer3" in layers:
+                feats["layer3"] = F.interpolate(m.layer3(l2), size=l2.shape[-1], mode="bilinear", align_corners=False)
+            f = torch.cat([F.avg_pool2d(feats[k], 3, 1, 1) for k in layers], 1)
+            outs.append(f.numpy().astype(np.float16))
+    out = np.concatenate(outs)
+    if cache:
+        np.save(cache, out)
+    return out
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slices_npz", required=True, help="picai_slices.py output made with --save_masks")
     ap.add_argument("--variants", default="hdc256,float,smooth_adc,smooth_hbv,smooth_mix,raw_adc,raw_hbv,raw_mix",
-                    help="comma list of hdc<num_proj> | float | smooth_{adc,hbv,mix} | raw_{adc,hbv,mix}")
+                    help="comma list of: hdc<num_proj> | float  (unsigned kNN anomaly), each optionally with "
+                         "_signed (only lesion-direction intensity deviations from the k nearest normals count) or "
+                         "_int (smoothed (HBV-ADC)/2 per-bin z appended to the descriptor before encoding); "
+                         "combo<w>_<hdcN|float> (smoothed (HBV-ADC)/2 z + w x kNN anomaly z); "
+                         "smooth_{adc,hbv,mix}; raw_{adc,hbv,mix}")
     ap.add_argument("--save_root", default="results", help="results go to <save_root>/patch_<variant><tag>/")
     ap.add_argument("--tag", default="", help="suffix for the results folder")
     ap.add_argument("--seed", type=int, default=0)
@@ -273,8 +325,10 @@ def main():
     ap.add_argument("--min_lesion_pixels", type=int, default=10, help="only used to reproduce picai_bundle's split")
     ap.add_argument("--patch", type=int, default=12)
     ap.add_argument("--stride", type=int, default=4)
-    ap.add_argument("--descriptor", choices=["pixels+stats", "pixels", "stats"], default="stats",
-                    help="patch descriptor: flattened 3-channel pixels and/or per-channel mean/std")
+    ap.add_argument("--descriptor", choices=["pixels+stats", "pixels", "stats"] + list(RESNET_LAYERS), default="stats",
+                    help="patch descriptor: flattened 3-channel pixels and/or per-channel mean/std, or frozen "
+                         "ResNet-18 feature maps at the patch centre (resnet_l2 | resnet_l3 | resnet_l2l3)")
+    ap.add_argument("--feature_cache", default="./mri_feature_cache")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--bin_cap", type=int, default=50000, help="random cap on normal patches stored per bin")
     ap.add_argument("--num_bins", type=int, default=8, help="HDC thermometer levels")
@@ -316,7 +370,14 @@ def main():
 
     t0 = time.time()
     add_stats, add_pixels = "stats" in args.descriptor, "pixels" in args.descriptor
-    P = {name: extract_patches(d, ix, args.patch, args.stride, add_stats, add_pixels) for name, ix in idx.items()}
+    fmaps = None
+    if args.descriptor in RESNET_LAYERS:
+        os.makedirs(args.feature_cache, exist_ok=True)
+        cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_{args.descriptor}.npy")
+        fmaps = resnet_feature_maps(d["images"], RESNET_LAYERS[args.descriptor], cache)
+    P = {name: extract_patches(d, ix, args.patch, args.stride, add_stats, add_pixels, fmaps)
+         for name, ix in idx.items()}
+    del fmaps
     t_extract = time.time() - t0
     for name, v in P.items():
         print(f"{name}: {len(v[0])} patches, dim {v[0].shape[1]}")
@@ -344,12 +405,61 @@ def main():
     bin_sizes = {int(b): int((btr[keep] == b).sum()) for b in range(27)}
     Xtr, btr = prep(Ftr[keep]), btr[keep]
     X = {s: prep(P[s][0]) for s in ("val", "test")}
+    # patch-mean intensities in standardised units (train-normal mean/std), for the signed and _int variants
+    Mtr_raw = P["train_normal"][5][keep]
+    m_mu, m_sd = Mtr_raw.mean(0), Mtr_raw.std(0) + 1e-6
+    Mstd = {"train": (Mtr_raw - m_mu) / m_sd, **{s: (P[s][5] - m_mu) / m_sd for s in ("val", "test")}}
+    mix = {k: (v[:, 2] - v[:, 1]) / 2 for k, v in Mstd.items()}  # (HBV - ADC) / 2, lesion direction = up
+    mix_mu = np.full(27, mix["train"].mean()); mix_sd = np.full(27, mix["train"].std() + 1e-6)
+    for b in np.unique(btr):
+        mix_mu[b], mix_sd[b] = mix["train"][btr == b].mean(), mix["train"][btr == b].std() + 1e-6
+    bins_of = {"train": btr, "val": P["val"][4], "test": P["test"][4]}
+    mix_z = {k: (mix[k] - mix_mu[bins_of[k]]) / mix_sd[bins_of[k]] for k in mix}  # per-bin z vs train normals
 
     def zscore_per_bin(sv, bv, scores, bins):
         mu_b = np.full(27, sv.mean()); sd_b = np.full(27, sv.std() + 1e-6)
         for b in np.unique(bv):
             mu_b[b], sd_b[b] = sv[bv == b].mean(), sv[bv == b].std() + 1e-6
         return (scores - mu_b[bins]) / sd_b[bins]
+
+    knn_cache = {}
+
+    def knn_z(base: str, mod: str):
+        """Per-bin z-scored patch scores {val, test} for a kNN variant (cached so combo variants reuse them)."""
+        key = (base, mod)
+        if key in knn_cache:
+            return knn_cache[key]
+        A = {"train": Xtr, **X}
+        if mod == "int":  # intensity channel, weighted like the whole descriptor (sqrt(D))
+            w = np.sqrt(Xtr.shape[1])
+            A = {k: np.concatenate([v, w * mix_z[k][:, None]], 1).astype(np.float32) for k, v in A.items()}
+        if base.startswith("hdc"):
+            enc = BinaryThermometerHDC(in_dim=A["train"].shape[1], num_proj=int(base[3:]), num_bins=args.num_bins,
+                                       seed=args.seed, clip_value=args.clip_value).fit(A["train"])
+            codes = lambda Z: hdc_codes(enc, Z)
+            mem = BinMemory("binary", enc.bit_dim, args.k)
+            meta = enc.meta()
+        elif base == "float":
+            codes = lambda Z: np.ascontiguousarray(Z, dtype=np.float32)
+            mem = BinMemory("float", A["train"].shape[1], args.k)
+            meta = {"encoder": "none (float standardised descriptors)", "dim": int(A["train"].shape[1])}
+        else:
+            raise SystemExit(f"unknown kNN base {base}")
+        mem.add(codes(A["train"]), btr)
+        sc = {}
+        for s in ("val", "test"):
+            D, I = mem.knn(codes(A[s]), bins_of[s])
+            if mod == "signed":
+                # only deviations in the lesion direction (darker ADC, brighter HBV) than the k nearest normals
+                nn = Mstd["train"][I]  # (n, k, 3)
+                q = Mstd[s][:, None, :]
+                sc[s] = (np.maximum(0, nn[..., 1] - q[..., 1]) + np.maximum(0, q[..., 2] - nn[..., 2])).mean(1)
+            else:
+                sc[s] = D.mean(1)
+        z = {s: zscore_per_bin(sc["val"][val_normal_patch], bins_of["val"][val_normal_patch], sc[s], bins_of[s])
+             for s in sc}
+        knn_cache[key] = (z, meta)
+        return knn_cache[key]
 
     for variant in [v.strip() for v in args.variants.split(",") if v.strip()]:
         t0 = time.time()
@@ -371,23 +481,16 @@ def main():
                 sv, bv = raw["val"][val_normal_patch], P["val"][4][val_normal_patch]
                 z = {s: zscore_per_bin(sv, bv, raw[s], P[s][4]) for s in raw}
                 meta = {"encoder": "none (patch-mean intensity)"}
+            elif variant.startswith("combo"):
+                wstr, base = variant[5:].split("_", 1)
+                zk, meta = knn_z(base, "")
+                sv, bv = RAW_M["mix"](P["val"][5])[val_normal_patch].astype(np.float64), bins_of["val"][val_normal_patch]
+                zs = {s: zscore_per_bin(sv, bv, RAW_M["mix"](P[s][5]).astype(np.float64), bins_of[s]) for s in zk}
+                z = {s: zs[s] + float(wstr) * zk[s] for s in zk}
+                meta = {**meta, "combo_weight": float(wstr)}
             else:
-                if variant.startswith("hdc"):
-                    enc = BinaryThermometerHDC(in_dim=Xtr.shape[1], num_proj=int(variant[3:]), num_bins=args.num_bins,
-                                               seed=args.seed, clip_value=args.clip_value).fit(Xtr)
-                    codes = lambda A: hdc_codes(enc, A)
-                    mem = BinMemory("binary", enc.bit_dim, args.k)
-                    meta = enc.meta()
-                elif variant == "float":
-                    codes = lambda A: np.ascontiguousarray(A, dtype=np.float32)
-                    mem = BinMemory("float", Xtr.shape[1], args.k)
-                    meta = {"encoder": "none (float standardised descriptors)", "dim": int(Xtr.shape[1])}
-                else:
-                    raise SystemExit(f"unknown variant {variant}")
-                mem.add(codes(Xtr), btr)
-                sc = {s: mem.score(codes(X[s]), P[s][4]) for s in ("val", "test")}
-                z = {s: zscore_per_bin(sc["val"][val_normal_patch], P["val"][4][val_normal_patch], sc[s], P[s][4])
-                     for s in sc}
+                base, _, mod = variant.partition("_")
+                z, meta = knn_z(base, mod)
             maps = {s: score_maps(d, idx[s], P[s][1], P[s][2], P[s][3], z[s], args.patch) for s in z}
         t_score = time.time() - t0
 
