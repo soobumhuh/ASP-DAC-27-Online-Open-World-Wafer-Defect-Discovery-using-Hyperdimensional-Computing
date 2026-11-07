@@ -14,6 +14,10 @@ Output: one .npz with
   case_isup     case ISUP grade from the marksheet
   lesion_pixels csPCa lesion pixels in this slice (expert mask, on the T2W grid)
   gland_pixels  prostate pixels in this slice (AI whole-gland mask)
+  with --save_masks, also:
+  lesion_mask   (N, S, S) uint8  csPCa lesion mask on the crop (nearest-neighbour resize)
+  gland_mask    (N, S, S) uint8  prostate mask on the crop
+  rel_z         slice position among the case's kept slices, 0 = first (lowest z) .. 1 = last
 
 What it does per case:
   1. read T2W and resample ADC + HBV + masks onto the T2W grid
@@ -91,7 +95,11 @@ def main():
                     help="keep a slice only if prostate covers this fraction of the crop")
     ap.add_argument("--max_neg", type=int, default=0, help="cap on csPCa-negative cases (0 = all found)")
     ap.add_argument("--max_pos", type=int, default=0, help="cap on csPCa-positive cases (0 = all found)")
+    ap.add_argument("--save_masks", action="store_true",
+                    help="also save per-slice lesion/gland masks on the crop and the relative slice position")
     args = ap.parse_args()
+    if os.path.exists(args.out):
+        raise SystemExit(f"{args.out} exists; refusing to overwrite")
 
     files = index_mha_files(args.images_dir)
     with open(os.path.join(args.labels_dir, "clinical_information", "marksheet.csv")) as f:
@@ -102,6 +110,8 @@ def main():
     caps = {0: args.max_neg, 1: args.max_pos}
     out = {k: [] for k in ("images", "patient_id", "study_id", "slice_z", "case_cspca",
                            "case_isup", "lesion_pixels", "gland_pixels")}
+    if args.save_masks:
+        out.update(lesion_mask=[], gland_mask=[], rel_z=[])
     S = args.size
     for r in rows:
         key = f"{r['patient_id']}_{r['study_id']}"
@@ -149,7 +159,13 @@ def main():
             out["case_isup"].append(int(r["case_ISUP"] or 0))
             out["lesion_pixels"].append(int(lesion[z, y0:y1, x0:x1].sum()))
             out["gland_pixels"].append(int(g.sum()))
+            if args.save_masks:
+                for name, m in (("lesion_mask", lesion), ("gland_mask", gland)):
+                    out[name].append(resize(m[z, y0:y1, x0:x1].astype(np.float32), (S, S), order=0,
+                                            preserve_range=True, anti_aliasing=False).astype(np.uint8))
             n_kept += 1
+        if args.save_masks:
+            out["rel_z"].extend(np.linspace(0.0, 1.0, n_kept) if n_kept > 1 else [0.5] * n_kept)
         n_seen[pos] += 1
         print(f"{key}: csPCa={'YES' if pos else 'NO '} kept {n_kept} slices")
 

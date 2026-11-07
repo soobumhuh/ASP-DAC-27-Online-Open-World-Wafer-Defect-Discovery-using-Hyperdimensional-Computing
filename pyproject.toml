@@ -16,6 +16,7 @@ dependencies = [
     "SimpleITK",
     "matplotlib",
     "picai-eval>=1.4.13",
+    "faiss-cpu>=1.15.1",
 ]
 
 [tool.uv]
