@@ -15,6 +15,7 @@ dependencies = [
     "torchvision",
     "SimpleITK",
     "matplotlib",
+    "picai-eval>=1.4.13",
 ]
 
 [tool.uv]

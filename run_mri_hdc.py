@@ -5,7 +5,8 @@ run_mri_hdc.py - Eric's Stage 1 + Stage 2 HDC pipeline on PI-CAI MRI slices.
 Same steps as run_full_hdc.py main(), with the wafer data call swapped for
 prepare_picai_bundle(), plus three MRI extras:
   - a no-HDC baseline (same kNN score on the float features) to see what HDC costs
-  - patient-level AUROC (max slice score per patient) for the lesion task
+  - patient-level AUROC (max score over all of a patient's test slices) for the lesion task,
+    computed both here and with picai_eval's case-level ROC
   - a picture of the highest- and lowest-scoring test slices
 
 Example:
@@ -36,11 +37,30 @@ def float_knn_score(X_ref: np.ndarray, X: np.ndarray, k: int) -> np.ndarray:
     return dist.mean(axis=1)
 
 
-def patient_auroc(pid: np.ndarray, y: np.ndarray, score: np.ndarray) -> float:
+def patient_scores(pid: np.ndarray, cspca: np.ndarray, score: np.ndarray):
+    """Patient score = max over ALL of the patient's test slices; label = csPCa-positive patient."""
     pats = np.unique(pid)
     p_score = np.array([score[pid == p].max() for p in pats])
-    p_label = np.array([int((y[pid == p] > 0).any()) for p in pats])
+    p_label = np.array([int((cspca[pid == p] > 0).any()) for p in pats])
+    return pats, p_label, p_score
+
+
+def patient_auroc(pid: np.ndarray, cspca: np.ndarray, score: np.ndarray) -> float:
+    _, p_label, p_score = patient_scores(pid, cspca, score)
     return binary_auroc(p_label, p_score)
+
+
+def picai_patient_auroc(pid: np.ndarray, cspca: np.ndarray, score: np.ndarray) -> float:
+    """Same patient scores, scored by picai_eval's case-level ROC (one case per patient).
+    picai_eval.evaluate() needs 3D detection maps, which slice scores are not, so the
+    case targets / predictions go straight into its Metrics object."""
+    from picai_eval import Metrics
+    pats, p_label, p_score = patient_scores(pid, cspca, score)
+    keys = [str(p) for p in pats]
+    m = Metrics(lesion_results={k: [] for k in keys},
+                case_target={k: int(t) for k, t in zip(keys, p_label)},
+                case_pred={k: float(v) for k, v in zip(keys, p_score)})
+    return float(m.auroc)
 
 
 def save_gallery(images, y, score, label_names, path, n=8):
@@ -73,6 +93,9 @@ def main():
     ap.add_argument("--test_frac", type=float, default=0.25)
     ap.add_argument("--min_lesion_pixels", type=int, default=10)
     ap.add_argument("--artifact_frac", type=float, default=0.5)
+    ap.add_argument("--keep_pos_nonlesion", action=argparse.BooleanOptionalAction, default=True,
+                    help="lesion task: keep non-lesion slices of csPCa patients in val/test "
+                         "(excluded from slice AUROC, used for the patient score). On by default.")
     # HDC encoder (paper values)
     ap.add_argument("--num_proj", type=int, default=1024)
     ap.add_argument("--num_bins", type=int, default=8)
@@ -94,7 +117,17 @@ def main():
         args.slices_npz, task=args.task, feature_set=args.feature_set, seed=args.seed,
         val_frac=args.val_frac, test_frac=args.test_frac, min_lesion_pixels=args.min_lesion_pixels,
         artifact_frac=args.artifact_frac,
+        keep_pos_nonlesion=args.keep_pos_nonlesion if args.task == "lesion" else False,
     )
+    split_counts = {
+        sp: {"patients": int(len(np.unique(meta[sp]["pid"]))),
+             "patients_pos": int(len(np.unique(meta[sp]["pid"][meta[sp]["cspca"] > 0]))),
+             "slices": {data.label_names[c]: int(n) for c, n in zip(*np.unique(meta[sp]["y"], return_counts=True))}}
+        for sp in ("train", "val", "test")}
+    # slices that count for slice-level metrics (drops the pos_nonlesion group, if present)
+    eval_ids = data.known_ids + data.unknown_ids
+    val_eval = np.isin(data.y_val, eval_ids)
+    test_eval = np.isin(data.y_test, eval_ids)
 
     # ---- HDC encoding (unchanged from Eric) ----
     enc = BinaryThermometerHDC(in_dim=data.X_aux_train.shape[1], num_proj=args.num_proj,
@@ -109,8 +142,8 @@ def main():
                          local_k=args.local_k, max_ref_normal=args.max_ref_normal, seed=args.seed)
     gate.fit(H_train[data.train_known_mask])
     calib = gate.calibrate(H_val[data.val_known_mask], known_reject_q=args.known_reject_q)
-    val_m = evaluate_stage1(gate, H_val, data.y_val, data.known_ids, data.unknown_ids)
-    test_m = evaluate_stage1(gate, H_test, data.y_test, data.known_ids, data.unknown_ids)
+    val_m = evaluate_stage1(gate, H_val[val_eval], data.y_val[val_eval], data.known_ids, data.unknown_ids)
+    test_m = evaluate_stage1(gate, H_test[test_eval], data.y_test[test_eval], data.known_ids, data.unknown_ids)
     print_metrics("STAGE 1 VALIDATION", val_m)
     print_metrics("STAGE 1 TEST", test_m)
 
@@ -121,8 +154,8 @@ def main():
     # ---- no-HDC baseline on the same features ----
     ref = data.X_aux_train[data.train_known_mask][: args.max_ref_normal]
     base = float_knn_score(ref, data.X_aux_test, args.local_k)
-    extras["baseline_float_knn_auroc"] = binary_auroc(y_bin, base)
-    extras["baseline_float_knn_auprc"] = binary_auprc(y_bin, base)
+    extras["baseline_float_knn_auroc"] = binary_auroc(y_bin[test_eval], base[test_eval])
+    extras["baseline_float_knn_auprc"] = binary_auprc(y_bin[test_eval], base[test_eval])
     extras["hdc_gate_auroc"] = test_m["unknown_auroc_by_binary_hdc_gate"]
     # per unknown class: which kinds of anomaly the gate finds
     for c in data.unknown_ids:
@@ -130,8 +163,16 @@ def main():
         if (data.y_test == c).any():
             extras[f"hdc_auroc_{data.label_names[c]}"] = binary_auroc((data.y_test[m] == c).astype(int), test_score[m])
     if args.task == "lesion":
-        extras["hdc_patient_auroc"] = patient_auroc(meta["test"]["pid"], data.y_test, test_score)
-        extras["baseline_patient_auroc"] = patient_auroc(meta["test"]["pid"], data.y_test, base)
+        pid, cspca = meta["test"]["pid"], meta["test"]["cspca"]
+        extras["hdc_patient_auroc"] = patient_auroc(pid, cspca, test_score)
+        extras["baseline_patient_auroc"] = patient_auroc(pid, cspca, base)
+        extras["hdc_patient_auroc_picai_eval"] = picai_patient_auroc(pid, cspca, test_score)
+        extras["baseline_patient_auroc_picai_eval"] = picai_patient_auroc(pid, cspca, base)
+        _, p_label, _ = patient_scores(pid, cspca, test_score)
+        extras["num_test_patients_pos"] = int(p_label.sum())
+        extras["num_test_patients_neg"] = int((p_label == 0).sum())
+        extras["num_test_slices_slice_eval"] = int(test_eval.sum())
+        extras["num_test_slices_patient_eval"] = int(len(pid))
     print_metrics("HDC VS NO-HDC BASELINE (TEST)", extras)
     save_gallery(data.W_test, data.y_test, test_score, data.label_names,
                  os.path.join(args.save_dir, "test_extremes.png"))
@@ -142,7 +183,8 @@ def main():
         H_stream = gather_stream_arrays(data.stream_sources, data.stream_indices, H_train, H_val, H_test)
         s = gate.predict_scores(H_stream)
         val_s = gate.predict_scores(H_val)
-        auto = stage2_auto_thresholds_binary(H_val, ~val_s["accepted"], val_s["unknown_score_binary_gate"],
+        auto = stage2_auto_thresholds_binary(H_val[val_eval], ~val_s["accepted"][val_eval],
+                                             val_s["unknown_score_binary_gate"][val_eval],
                                              gate.tau_score, q=args.stage2_auto_q, seed=args.seed)
         clus = BinaryHDCOnlineClusterer(
             bit_dim=enc.bit_dim, tau_cluster=auto["tau_cluster"], max_cluster_radius=auto["max_cluster_radius"],
@@ -169,7 +211,7 @@ def main():
     with open(os.path.join(args.save_dir, "results.json"), "w") as f:
         json.dump({"args": vars(args), "label_names": data.label_names, "encoder": enc.meta(),
                    "stage1_calibration": calib, "stage1_val": val_m, "stage1_test": test_m,
-                   "extras": extras, "stage2": stage2}, f, indent=2, default=json_default)
+                   "split_counts": split_counts, "extras": extras, "stage2": stage2}, f, indent=2, default=json_default)
     print("saved to", args.save_dir)
 
 
