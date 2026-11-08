@@ -396,6 +396,7 @@ def main():
                     help="grid: 3 slice levels x 3x3 in-plane grid (27 bins); zone: 3 slice levels x AI zone "
                          "(PZ / TZ / unlabelled) at the patch centre (9 bins; needs zone_mask in the npz)")
     ap.add_argument("--sup_k", type=int, default=25, help="neighbours for the supervised kNN vote")
+    ap.add_argument("--ctx3d", type=int, default=0, help="proto/vote: bundle patch HVs with the slices above/below")
     ap.add_argument("--split_file", default=None,
                     help="json {train: [patient ids], val: [...], test: [...]} overriding the seeded split "
                          "(used by patient_hdc.py to cross-fit image scores on train patients)")
@@ -403,6 +404,9 @@ def main():
                     help="npz path: per case (study) of val and test, the max of the map and the hypervectors of "
                          "its top-5 patches, for the first variant (patient_hdc.py)")
     ap.add_argument("--skip_eval", action="store_true", help="no detection / picai_eval (with --dump_cases)")
+    ap.add_argument("--save_maps", default=None,
+                    help="pickle path: per case (study) of val and test, the z-scored map volume (float16), the lesion "
+                         "mask and the csPCa label, for the first variant (postproc_search.py)")
     ap.add_argument("--eval_splits", default="val,test",
                     help="splits to run detection + picai_eval on (hyperparameter search: val only)")
     ap.add_argument("--sup_epochs", type=int, default=5, help="HDC retraining epochs for proto variants")
@@ -519,6 +523,26 @@ def main():
     knn_cache = {}
     last_codes = {}
 
+    def with_context(codes, sl, ys, xs):
+        """Bundle (bitwise majority of 3) each patch HV with the byte-rotated HVs of the patch at the same (y, x)
+        on the slice above and below in the same case (itself when that patch does not exist)."""
+        S = d["images"].shape[-1]
+        key = (sl.astype(np.int64) * S + ys) * S + xs
+        order = np.argsort(key)
+        ks = key[order]
+        out = []
+        for dz, sh in ((-1, 1), (1, 2)):
+            nb = sl + dz
+            ok = (nb >= 0) & (nb < len(d["study_id"]))
+            ok[ok] &= d["study_id"][nb[ok]] == d["study_id"][sl[ok]]
+            nk = (nb.astype(np.int64) * S + ys) * S + xs
+            pos = np.clip(np.searchsorted(ks, nk), 0, len(ks) - 1)
+            hit = ok & (ks[pos] == nk)
+            src = np.where(hit, order[pos], np.arange(len(sl)))
+            out.append(np.roll(codes[src], sh, axis=1))
+        a, b, c = codes, out[0], out[1]
+        return ((a & b) | (a & c) | (b & c)).astype(np.uint8)
+
     def sup_z(kind: str, nproj: int, negplus: bool):
         """Design A: supervised HDC per bin (proto = sub-prototypes + retraining; vote = labelled kNN)."""
         from hdc_classifier import HDCPrototypeClassifier, bipolar, knn_vote_scores, unpack_codes
@@ -531,13 +555,22 @@ def main():
         else:  # lesion if the patch is at least f lesion; 'normal' (negplus) only if it has no lesion pixel
             frac = patch_fraction(d["lesion_mask"], slp, yp, xp, args.patch)
             les, clean = frac >= float(args.label_rule[4:]), frac == 0
-        C = {"n": hdc_codes(enc, Xtr), "l": hdc_codes(enc, prep(Fp[les])),
-             "val": hdc_codes(enc, X["val"]), "test": hdc_codes(enc, X["test"])}
+        if args.ctx3d:  # 3D context: bundle each patch HV with the permuted HVs of the slices above and below
+            full_n = with_context(hdc_codes(enc, prep(Ftr)), *P["train_normal"][1:4])
+            full_p = with_context(hdc_codes(enc, prep(Fp)), slp, yp, xp)
+            C = {"n": full_n[keep], "l": full_p[les],
+                 "val": with_context(hdc_codes(enc, X["val"]), *P["val"][1:4]),
+                 "test": with_context(hdc_codes(enc, X["test"]), *P["test"][1:4])}
+        else:
+            full_p = None
+            C = {"n": hdc_codes(enc, Xtr), "l": hdc_codes(enc, prep(Fp[les])),
+                 "val": hdc_codes(enc, X["val"]), "test": hdc_codes(enc, X["test"])}
         B = {"n": btr, "l": bp[les], "val": bins_of["val"], "test": bins_of["test"]}
         if negplus:  # also non-lesion gland patches of csPCa-positive train patients as 'normal'
             nl = np.where(clean)[0]
             nl = np.random.default_rng(args.seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
-            C["n"] = np.concatenate([C["n"], hdc_codes(enc, prep(Fp[nl]))]); B["n"] = np.concatenate([B["n"], bp[nl]])
+            C["n"] = np.concatenate([C["n"], full_p[nl] if full_p is not None else hdc_codes(enc, prep(Fp[nl]))])
+            B["n"] = np.concatenate([B["n"], bp[nl]])
         group = lambda b: bin_group(b, args.bin_mode)  # same zone / same grid cell
         sc = {s: np.zeros(len(C[s])) for s in ("val", "test")}
         n_fallback = 0
@@ -704,6 +737,29 @@ def main():
         settings = {f"q{q:g}/t{tf:g}": (float(np.percentile(ref, q)), float(tf * ref.std() + 1e-6))
                     for q in qs for tf in tfs}
         vols = {}
+        if args.save_maps and variant == variants[0]:
+            import pickle
+            dump = {}
+            for s in ("val", "test"):
+                v = patient_volumes(d, idx[s], maps[s])
+                dump[s] = {int(k): {"map": c["map"].astype(np.float16), "lesion": (c["lesion"] > 0).astype(np.uint8),
+                                    "cspca": c["cspca"],
+                                    "zone": (d["zone_mask"][c["slices"]] if "zone_mask" in d else
+                                             np.zeros_like(c["lesion"])).astype(np.uint8),
+                                    "rel_z": d["rel_z"][c["slices"]].astype(np.float32)} for k, c in v.items()}
+                if s in last_codes:  # patch hypervectors + positions (row in the case volume, y, x) for re-scoring
+                    st_patch = d["study_id"][P[s][1]]
+                    for k, c in v.items():
+                        j = np.where(st_patch == k)[0]
+                        row = {int(sl): r for r, sl in enumerate(c["slices"])}
+                        dump[s][int(k)]["codes"] = last_codes[s][j]
+                        dump[s][int(k)]["pos"] = np.stack([[row[int(x)] for x in P[s][1][j]], P[s][2][j],
+                                                           P[s][3][j]], 1).astype(np.int16)
+                        dump[s][int(k)]["patch"] = args.patch
+            os.makedirs(os.path.dirname(os.path.abspath(args.save_maps)), exist_ok=True)
+            with open(args.save_maps, "wb") as fh:
+                pickle.dump(dump, fh, protocol=4)
+            print("saved maps ->", args.save_maps)
         eval_splits = [s for s in ("val", "test") if s in args.eval_splits.split(",")]
         for s in eval_splits:
             vols[s] = patient_volumes(d, idx[s], maps[s])
