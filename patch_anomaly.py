@@ -48,14 +48,39 @@ from picai_bundle import split_patients
 from wafer_hdc_encoding import BinaryThermometerHDC, apply_clip, apply_standardize, fit_clip_stats, fit_standardize
 
 
-def rebin(d: dict, sl: np.ndarray, ys: np.ndarray, xs: np.ndarray, mode: str):
-    """Position bins. grid: slice level (3) x in-plane 3 x 3 grid of the crop = 27.
-    zone: slice level (3) x zone at the patch centre (0 = unlabelled, 1 = PZ, 2 = TZ; AI zonal mask) = 9."""
+def n_bins(mode: str, levels: int = 3) -> int:
+    return levels * {"grid": 9, "zone": 3, "zone_grid": 27}[mode]
+
+
+def rebin(d: dict, sl: np.ndarray, ys: np.ndarray, xs: np.ndarray, mode: str, levels: int = 3):
+    """Position bins. grid: slice level x in-plane 3 x 3 grid of the crop (27 for 3 levels).
+    zone: slice level x zone at the patch centre (0 = unlabelled, 1 = PZ, 2 = TZ; AI zonal mask) (9 for 3 levels).
+    zone_grid: slice level x zone x 3 x 3 grid."""
     S = d["images"].shape[-1]
-    zl = np.minimum((d["rel_z"][sl] * 3).astype(int), 2)
+    zl = np.minimum((d["rel_z"][sl] * levels).astype(int), levels - 1)
+    cell = np.minimum(ys * 3 // S, 2) * 3 + np.minimum(xs * 3 // S, 2)
     if mode == "zone":
         return zl * 3 + d["zone_mask"][sl, ys, xs].astype(np.int64)
-    return zl * 9 + np.minimum(ys * 3 // S, 2) * 3 + np.minimum(xs * 3 // S, 2)
+    if mode == "zone_grid":
+        return (zl * 3 + d["zone_mask"][sl, ys, xs].astype(np.int64)) * 9 + cell
+    return zl * 9 + cell
+
+
+def bin_group(b, mode: str):
+    """Coarser group used to pool lesion patches when a bin has too few: same zone (zone modes) or grid cell."""
+    return {"zone": b % 3, "zone_grid": (b // 9) % 3, "grid": b % 9}[mode]
+
+
+def patch_fraction(mask: np.ndarray, sl, ys, xs, P: int) -> np.ndarray:
+    """Fraction of mask pixels inside each P x P patch (summed-area table per slice)."""
+    h = P // 2
+    out = np.zeros(len(sl))
+    for i in np.unique(sl):
+        m = sl == i
+        c = np.pad(mask[i].astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+        y0, x0 = ys[m] - h, xs[m] - h
+        out[m] = (c[y0 + P, x0 + P] - c[y0, x0 + P] - c[y0 + P, x0] + c[y0, x0]) / (P * P)
+    return out
 
 
 # ---------------------------------------------------------------- patches
@@ -65,11 +90,12 @@ def patch_grid(S: int, P: int, stride: int) -> np.ndarray:
 
 
 def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, add_stats: bool, add_pixels: bool = True,
-                    fmaps: np.ndarray = None):
+                    fmaps: np.ndarray = None, add_pct: bool = False, add_tex: bool = False, fch: slice = None):
     """Patches of slices idx whose centre lies in the gland.
     Returns descriptors (n, D) float32, slice index (n,), centre y, x (n,), position bin (n,),
     per-channel patch means (n, C) (used by the smoothed raw-intensity baselines).
-    With fmaps (N, D, h, w): the descriptor is the feature vector at the patch centre instead (HDnn / PatchCore)."""
+    With fmaps (N, D, h, w): the feature vector at the patch centre (HDnn / PatchCore; channels fch) is part of it.
+    add_pct: per-channel 10/50/90th percentiles; add_tex: T2W mean |d/dy|, mean |d/dx|, mean |Laplacian|."""
     S = d["images"].shape[-1]
     cs = patch_grid(S, P, stride)
     h = P // 2
@@ -88,16 +114,26 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, add_stats: bo
         oy = cy[:, None] - h + np.arange(P)[None, :]
         ox = cx[:, None] - h + np.arange(P)[None, :]
         pat = img[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
+        parts = []
         if fmaps is not None:
             fh = fmaps.shape[-1]
             fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
             fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
-            f = fmaps[i][:, fy, fx].T.astype(np.float32)
-        else:
-            parts = [pat.reshape(len(cy), -1)] if add_pixels else []
-            if add_stats:
-                parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
-            f = np.concatenate(parts, axis=1)
+            fm = np.asarray(fmaps[i] if fch is None else fmaps[i][fch], dtype=np.float32)
+            parts.append(fm[:, fy, fx].T)
+        if add_pixels:
+            parts.append(pat.reshape(len(cy), -1))
+        if add_stats:
+            parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
+        if add_pct:
+            parts.append(np.percentile(pat.reshape(len(cy), pat.shape[1], -1), [10, 50, 90], axis=2)
+                         .transpose(1, 2, 0).reshape(len(cy), -1))
+        if add_tex:
+            t = pat[:, 0]
+            lap = np.abs(4 * t[:, 1:-1, 1:-1] - t[:, :-2, 1:-1] - t[:, 2:, 1:-1] - t[:, 1:-1, :-2] - t[:, 1:-1, 2:])
+            parts.append(np.stack([np.abs(np.diff(t, axis=1)).mean((1, 2)), np.abs(np.diff(t, axis=2)).mean((1, 2)),
+                                   lap.mean((1, 2))], 1))
+        f = np.concatenate(parts, axis=1)
         feats.append(f.astype(np.float32))
         means.append(pat.mean(axis=(2, 3)).astype(np.float32))
         sl.append(np.full(len(cy), i)); ys.append(cy); xs.append(cx)
@@ -167,8 +203,9 @@ def hdc_codes(enc: BinaryThermometerHDC, X: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- maps
-def score_maps(d, slices, sl, ys, xs, z, P):
-    """Average overlapping patch scores per pixel; NaN where no patch covers / outside gland."""
+def score_maps(d, slices, sl, ys, xs, z, P, sigma: float = 0.0):
+    """Average overlapping patch scores per pixel; NaN where no patch covers / outside gland.
+    sigma > 0: in-plane Gaussian smoothing inside the gland (normalised convolution)."""
     S = d["images"].shape[-1]
     h = P // 2
     row = np.full(int(slices.max()) + 1, -1, np.int64)
@@ -184,6 +221,13 @@ def score_maps(d, slices, sl, ys, xs, z, P):
         m = acc / cnt
     gland = d["gland_mask"][slices] > 0
     m[~gland | (cnt == 0)] = np.nan
+    if sigma > 0:
+        from scipy.ndimage import gaussian_filter
+        w = (~np.isnan(m)).astype(np.float64)
+        num = gaussian_filter(np.nan_to_num(m), sigma=(0, sigma, sigma))
+        den = gaussian_filter(w, sigma=(0, sigma, sigma))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            m = np.where(w > 0, num / den, np.nan)
     return m
 
 
@@ -244,22 +288,22 @@ def save_figure(d, vols, path, offset, n_each=3, seed=0, title="", temp=1.0):
 
 
 # ---------------------------------------------------------------- detection + picai_eval
-_OT = (0.0, 1.0)
+_OT = (0.0, 1.0, "dynamic-fast")
 
 
 def _detect(m):
     from report_guided_annotation import extract_lesion_candidates
     from scipy.special import expit
     prob = expit((np.nan_to_num(m, nan=-1e3) - _OT[0]) / _OT[1])
-    return extract_lesion_candidates(prob.astype(np.float64))[0].astype(np.float32)
+    return extract_lesion_candidates(prob.astype(np.float64), threshold=_OT[2])[0].astype(np.float32)
 
 
-def _set_ot(o, t):
+def _set_ot(o, t, mode="dynamic-fast"):
     global _OT
-    _OT = (o, t)
+    _OT = (o, t, mode)
 
 
-def evaluate_maps(vols, settings, pool_size):
+def evaluate_maps(vols, settings, pool_size, threshold_mode: str = "dynamic-fast"):
     """voxel AUROC + picai_eval metrics for each setting {label: (offset, temperature)}:
     detection input = sigmoid((z - offset) / temperature)."""
     from multiprocessing import get_context
@@ -276,7 +320,7 @@ def evaluate_maps(vols, settings, pool_size):
     y_true = [(vols[p]["lesion"] > 0).astype(np.int32) for p in keys]
     out["num_lesion_patients_by_mask"] = int(sum(y.any() for y in y_true))
     for label, (o, t) in settings.items():
-        with get_context("fork").Pool(pool_size, initializer=_set_ot, initargs=(o, t)) as pool:
+        with get_context("fork").Pool(pool_size, initializer=_set_ot, initargs=(o, t, threshold_mode)) as pool:
             y_det = pool.map(_detect, [vols[p]["map"] for p in keys])
         m = evaluate(y_det=y_det, y_true=y_true, subject_list=[str(p) for p in keys], num_parallel_calls=pool_size)
         out["by_offset"][label] = {"offset": float(o), "temp": float(t), "patient_auroc": float(m.auroc), "lesion_ap": float(m.AP),
@@ -295,7 +339,7 @@ def resnet_feature_maps(images: np.ndarray, layers, cache: str = None, batch_siz
     upsampled to 224, layer2 (28 x 28, 128 ch) and/or layer3 (14 x 14, 256 ch, upsampled to 28 x 28),
     3 x 3 average-pooled for local context (as in PatchCore). Returns (N, D, 28, 28) float16."""
     if cache and os.path.exists(cache):
-        return np.load(cache)
+        return np.load(cache, mmap_mode="r")
     import torch
     import torch.nn.functional as F
     from torchvision.models import resnet18, ResNet18_Weights
@@ -335,11 +379,20 @@ def main():
     ap.add_argument("--min_lesion_pixels", type=int, default=10, help="only used to reproduce picai_bundle's split")
     ap.add_argument("--patch", type=int, default=12)
     ap.add_argument("--stride", type=int, default=4)
-    ap.add_argument("--descriptor", choices=["pixels+stats", "pixels", "stats"] + list(RESNET_LAYERS), default="stats",
+    ap.add_argument("--descriptor", default="stats",
                     help="patch descriptor: flattened 3-channel pixels and/or per-channel mean/std, or frozen "
                          "ResNet-18 feature maps at the patch centre (resnet_l2 | resnet_l3 | resnet_l2l3)")
     ap.add_argument("--feature_cache", default="./mri_feature_cache")
-    ap.add_argument("--bin_mode", choices=["grid", "zone"], default="grid",
+    ap.add_argument("--slice_levels", type=int, default=3, help="slice-level bins (apex .. base)")
+    ap.add_argument("--sup_lr", type=float, default=1.0, help="retraining step for proto variants")
+    ap.add_argument("--sup_balance", type=int, default=1, help="class-balanced retraining epochs (1) or all samples (0)")
+    ap.add_argument("--label_rule", default="centre",
+                    help="lesion patch = centre in the lesion mask ('centre') or lesion fraction >= f ('frac0.25')")
+    ap.add_argument("--score_mode", default="max", help="proto score per class: max | top2 | lse<T> (soft max)")
+    ap.add_argument("--smooth_sigma", type=float, default=0.0, help="Gaussian smoothing of the maps (px)")
+    ap.add_argument("--det_threshold", default="dynamic-fast",
+                    help="extract_lesion_candidates threshold mode: dynamic-fast | dynamic")
+    ap.add_argument("--bin_mode", choices=["grid", "zone", "zone_grid"], default="grid",
                     help="grid: 3 slice levels x 3x3 in-plane grid (27 bins); zone: 3 slice levels x AI zone "
                          "(PZ / TZ / unlabelled) at the patch centre (9 bins; needs zone_mask in the npz)")
     ap.add_argument("--sup_k", type=int, default=25, help="neighbours for the supervised kNN vote")
@@ -350,6 +403,8 @@ def main():
                     help="npz path: per case (study) of val and test, the max of the map and the hypervectors of "
                          "its top-5 patches, for the first variant (patient_hdc.py)")
     ap.add_argument("--skip_eval", action="store_true", help="no detection / picai_eval (with --dump_cases)")
+    ap.add_argument("--eval_splits", default="val,test",
+                    help="splits to run detection + picai_eval on (hyperparameter search: val only)")
     ap.add_argument("--sup_epochs", type=int, default=5, help="HDC retraining epochs for proto variants")
     ap.add_argument("--sup_nsub", default="10,5", help="sub-prototypes per class (normal,lesion) for proto variants")
     ap.add_argument("--k", type=int, default=10)
@@ -398,22 +453,25 @@ def main():
     supervised = any(v.startswith(("proto", "vote")) for v in variants)
     if supervised:
         idx["train_pos"] = np.where((split == "train") & (cspca == 1))[0]
-    if args.bin_mode == "zone" and "zone_mask" not in d:
+    if args.bin_mode.startswith("zone") and "zone_mask" not in d:
         raise SystemExit("--bin_mode zone needs zone_mask: rebuild with picai_slices.py --save_masks --zonal_dir ...")
-    NB = 9 if args.bin_mode == "zone" else 27
+    NB = n_bins(args.bin_mode, args.slice_levels)
 
     t0 = time.time()
-    add_stats, add_pixels = "stats" in args.descriptor, "pixels" in args.descriptor
-    fmaps = None
-    if args.descriptor in RESNET_LAYERS:
+    toks = set(args.descriptor.split("+"))
+    add_stats, add_pixels, add_pct, add_tex = ("stats" in toks), ("pixels" in toks), ("pct" in toks), ("tex" in toks)
+    fmaps, fch = None, None
+    rn = [t for t in toks if t in RESNET_LAYERS]
+    if rn:
+        # one cached layer2+3 map (memory-mapped); layer2 = channels 0-127, layer3 = 128-383
         os.makedirs(args.feature_cache, exist_ok=True)
-        cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_{args.descriptor}.npy")
-        fmaps = resnet_feature_maps(d["images"], RESNET_LAYERS[args.descriptor], cache)
-    P = {name: extract_patches(d, ix, args.patch, args.stride, add_stats, add_pixels, fmaps)
+        cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2l3.npy")
+        fmaps = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2l3"], cache)
+        fch = {"resnet_l2": slice(0, 128), "resnet_l3": slice(128, 384), "resnet_l2l3": None}[rn[0]]
+    P = {name: extract_patches(d, ix, args.patch, args.stride, add_stats, add_pixels, fmaps, add_pct, add_tex, fch)
          for name, ix in idx.items()}
     del fmaps
-    if args.bin_mode != "grid":
-        P = {k: (*v[:4], rebin(d, v[1], v[2], v[3], args.bin_mode), *v[5:]) for k, v in P.items()}
+    P = {k: (*v[:4], rebin(d, v[1], v[2], v[3], args.bin_mode, args.slice_levels), *v[5:]) for k, v in P.items()}
     t_extract = time.time() - t0
     for name, v in P.items():
         print(f"{name}: {len(v[0])} patches, dim {v[0].shape[1]}")
@@ -467,15 +525,20 @@ def main():
         enc = BinaryThermometerHDC(in_dim=Xtr.shape[1], num_proj=nproj, num_bins=args.num_bins,
                                    seed=args.seed, clip_value=args.clip_value).fit(Xtr)
         Fp, slp, yp, xp, bp = P["train_pos"][:5]
-        les = d["lesion_mask"][slp, yp, xp] > 0
+        if args.label_rule == "centre":
+            les = d["lesion_mask"][slp, yp, xp] > 0
+            clean = ~les
+        else:  # lesion if the patch is at least f lesion; 'normal' (negplus) only if it has no lesion pixel
+            frac = patch_fraction(d["lesion_mask"], slp, yp, xp, args.patch)
+            les, clean = frac >= float(args.label_rule[4:]), frac == 0
         C = {"n": hdc_codes(enc, Xtr), "l": hdc_codes(enc, prep(Fp[les])),
              "val": hdc_codes(enc, X["val"]), "test": hdc_codes(enc, X["test"])}
         B = {"n": btr, "l": bp[les], "val": bins_of["val"], "test": bins_of["test"]}
         if negplus:  # also non-lesion gland patches of csPCa-positive train patients as 'normal'
-            nl = np.where(~les)[0]
+            nl = np.where(clean)[0]
             nl = np.random.default_rng(args.seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
             C["n"] = np.concatenate([C["n"], hdc_codes(enc, prep(Fp[nl]))]); B["n"] = np.concatenate([B["n"], bp[nl]])
-        group = (lambda b: b % 3) if args.bin_mode == "zone" else (lambda b: b % 9)  # same zone / same grid cell
+        group = lambda b: bin_group(b, args.bin_mode)  # same zone / same grid cell
         sc = {s: np.zeros(len(C[s])) for s in ("val", "test")}
         n_fallback = 0
         for b in range(NB):
@@ -494,7 +557,8 @@ def main():
             if kind == "proto":
                 Xn, Xl = bipolar(unpack_codes(C["n"][mn], enc.bit_dim)), bipolar(unpack_codes(C["l"][ml], enc.bit_dim))
                 clf = HDCPrototypeClassifier(n_sub=tuple(int(v) for v in args.sup_nsub.split(",")),
-                                             epochs=args.sup_epochs, seed=args.seed + b).fit(
+                                             epochs=args.sup_epochs, seed=args.seed + b, lr=args.sup_lr,
+                                             balance=bool(args.sup_balance), score_mode=args.score_mode).fit(
                     np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
                 for s, q in qs.items():
                     if q.any():
@@ -586,7 +650,7 @@ def main():
             else:
                 base, _, mod = variant.partition("_")
                 z, meta = knn_z(base, mod)
-            maps = {s: score_maps(d, idx[s], P[s][1], P[s][2], P[s][3], z[s], args.patch) for s in z}
+            maps = {s: score_maps(d, idx[s], P[s][1], P[s][2], P[s][3], z[s], args.patch, args.smooth_sigma) for s in z}
         t_score = time.time() - t0
 
         if args.dump_cases and variant == variants[0]:
@@ -640,9 +704,10 @@ def main():
         settings = {f"q{q:g}/t{tf:g}": (float(np.percentile(ref, q)), float(tf * ref.std() + 1e-6))
                     for q in qs for tf in tfs}
         vols = {}
-        for s in ("val", "test"):
+        eval_splits = [s for s in ("val", "test") if s in args.eval_splits.split(",")]
+        for s in eval_splits:
             vols[s] = patient_volumes(d, idx[s], maps[s])
-            res[s] = evaluate_maps(vols[s], settings, args.workers)
+            res[s] = evaluate_maps(vols[s], settings, args.workers, args.det_threshold)
         t_eval = time.time() - t1
         res.update(runtime_s={"patch_extraction_shared": round(t_extract, 1), "score_maps": round(t_score, 1),
                               "detection_and_eval": round(t_eval, 1)},
@@ -652,12 +717,12 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, "results.json"), "w") as fh:
             json.dump(res, fh, indent=2)
-        if args.figure:
+        if args.figure and "test" in vols:
             o, t = settings[args.figure]
             save_figure(d, vols["test"], os.path.join(out_dir, "test_patients.png"), o, seed=args.seed, temp=t,
                         title=f"{variant} {args.descriptor} P={args.patch} stride={args.stride} "
                               f"{args.figure} seed={args.seed}  heat = sigmoid((z-{o:.2f})/{t:.2f})")
-        for s in ("val", "test"):
+        for s in eval_splits:
             best = max(res[s]["by_offset"].items(), key=lambda kv: kv[1]["lesion_ap"])
             print(f"[{variant} {s}] voxel AUROC {res[s]['voxel_auroc_in_gland']:.3f} | best-AP setting {best[0]}: "
                   f"patient AUROC {best[1]['patient_auroc']:.3f} AP {best[1]['lesion_ap']:.3f} "

@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib",
     "picai-eval>=1.4.13",
     "faiss-cpu>=1.15.1",
+    "optuna>=5.0.0",
 ]
 
 [tool.uv]

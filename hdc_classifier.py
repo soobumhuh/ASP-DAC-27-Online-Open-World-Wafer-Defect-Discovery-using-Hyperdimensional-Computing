@@ -43,8 +43,10 @@ def majority(counts: np.ndarray) -> np.ndarray:
 
 # ------------------------------------------------------------------ design A: prototypes + retraining
 class HDCPrototypeClassifier:
-    def __init__(self, n_sub=(10, 5), epochs: int = 5, kmeans_iter: int = 5, batch: int = 2048, seed: int = 0):
+    def __init__(self, n_sub=(10, 5), epochs: int = 5, kmeans_iter: int = 5, batch: int = 2048, seed: int = 0,
+                 lr: float = 1.0, balance: bool = True, score_mode: str = "max"):
         self.n_sub, self.epochs, self.kmeans_iter, self.batch = n_sub, epochs, kmeans_iter, batch
+        self.lr, self.balance, self.score_mode = lr, balance, score_mode
         self.rng = np.random.default_rng(seed)
 
     def _kmeans(self, Xb: np.ndarray, k: int) -> np.ndarray:
@@ -64,8 +66,11 @@ class HDCPrototypeClassifier:
         idx = [np.where(y == c)[0] for c in (0, 1)]
         n_bal = min(len(idx[0]), max(len(idx[1]), 1) * 1)  # class-balanced epochs
         for _ in range(self.epochs):
-            pick = np.concatenate([self.rng.choice(idx[0], n_bal, replace=False),
-                                   self.rng.choice(idx[1], n_bal, replace=len(idx[1]) < n_bal)])
+            if self.balance:
+                pick = np.concatenate([self.rng.choice(idx[0], n_bal, replace=False),
+                                       self.rng.choice(idx[1], n_bal, replace=len(idx[1]) < n_bal)])
+            else:
+                pick = np.arange(len(y))
             self.rng.shuffle(pick)
             for i0 in range(0, len(pick), self.batch):
                 b = pick[i0:i0 + self.batch]
@@ -81,17 +86,27 @@ class HDCPrototypeClassifier:
                     # add to the true class's nearest sub-prototype
                     m = wrong & (t == c)
                     if m.any():
-                        np.add.at(self.counts[c], S[c][m].argmax(1), X[m])
+                        np.add.at(self.counts[c], S[c][m].argmax(1), self.lr * X[m])
                     # subtract from the wrongly predicted class's nearest sub-prototype
                     m = wrong & (pred == c)
                     if m.any():
-                        np.add.at(self.counts[c], S[c][m].argmax(1), -X[m])
+                        np.add.at(self.counts[c], S[c][m].argmax(1), -self.lr * X[m])
         self.protos = [majority(c) for c in self.counts]
         return self
 
+    def _agg(self, S: np.ndarray) -> np.ndarray:
+        """Similarity to a class from its sub-prototype similarities (S in [-1, 1])."""
+        if self.score_mode == "max" or S.shape[1] == 1:
+            return S.max(1)
+        if self.score_mode == "top2":
+            return np.sort(S, 1)[:, -2:].mean(1)
+        T = float(self.score_mode[3:])  # lse<T>: soft maximum
+        m = S.max(1, keepdims=True)
+        return (m + T * np.log(np.exp((S - m) / T).sum(1, keepdims=True)))[:, 0]
+
     def score(self, Xb: np.ndarray) -> np.ndarray:
         D = Xb.shape[1]
-        return ((Xb @ self.protos[1].T).max(1) - (Xb @ self.protos[0].T).max(1)) / D
+        return self._agg(Xb @ self.protos[1].T / D) - self._agg(Xb @ self.protos[0].T / D)
 
 
 def knn_vote_scores(lib_codes: np.ndarray, lib_y: np.ndarray, q_codes: np.ndarray, bit_dim: int, k: int = 25):
