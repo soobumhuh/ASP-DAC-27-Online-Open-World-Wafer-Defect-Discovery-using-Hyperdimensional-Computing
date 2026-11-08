@@ -18,6 +18,9 @@ Output: one .npz with
   lesion_mask   (N, S, S) uint8  csPCa lesion mask on the crop (nearest-neighbour resize)
   gland_mask    (N, S, S) uint8  prostate mask on the crop
   rel_z         slice position among the case's kept slices, 0 = first (lowest z) .. 1 = last
+  with --zonal_dir as well:
+  zone_mask     (N, S, S) uint8  AI zonal anatomy on the crop: 1 = peripheral zone (PZ), 2 = transition zone (TZ),
+                0 = outside / not labelled (picai_labels anatomical_delineations/zonal_pz_tz/AI/<set>)
 
 What it does per case:
   1. read T2W and resample ADC + HBV + masks onto the T2W grid
@@ -95,6 +98,9 @@ def main():
                     help="keep a slice only if prostate covers this fraction of the crop")
     ap.add_argument("--max_neg", type=int, default=0, help="cap on csPCa-negative cases (0 = all found)")
     ap.add_argument("--max_pos", type=int, default=0, help="cap on csPCa-positive cases (0 = all found)")
+    ap.add_argument("--zonal_dir", default=None,
+                    help="with --save_masks: folder of AI zonal masks (e.g. <labels>/anatomical_delineations/"
+                         "zonal_pz_tz/AI/HeviAI23); adds zone_mask (1 = PZ, 2 = TZ)")
     ap.add_argument("--save_masks", action="store_true",
                     help="also save per-slice lesion/gland masks on the crop and the relative slice position")
     args = ap.parse_args()
@@ -112,6 +118,8 @@ def main():
                            "case_isup", "lesion_pixels", "gland_pixels")}
     if args.save_masks:
         out.update(lesion_mask=[], gland_mask=[], rel_z=[])
+        if args.zonal_dir:
+            out["zone_mask"] = []
     S = args.size
     for r in rows:
         key = f"{r['patient_id']}_{r['study_id']}"
@@ -137,6 +145,11 @@ def main():
             lesion = on_grid(sitk.ReadImage(lesion_p, sitk.sitkUInt8), t2w, nearest=True) > 0
         else:
             lesion = np.zeros_like(gland)
+        zone = None
+        if args.save_masks and args.zonal_dir:
+            zp = os.path.join(args.zonal_dir, key + ".nii.gz")
+            zone = (on_grid(sitk.ReadImage(zp, sitk.sitkUInt8), t2w, nearest=True) if os.path.exists(zp)
+                    else np.zeros(gland.shape, np.uint8))
         if gland.sum() < 100:
             print("skip (empty prostate mask):", key)
             continue
@@ -160,7 +173,8 @@ def main():
             out["lesion_pixels"].append(int(lesion[z, y0:y1, x0:x1].sum()))
             out["gland_pixels"].append(int(g.sum()))
             if args.save_masks:
-                for name, m in (("lesion_mask", lesion), ("gland_mask", gland)):
+                pairs = [("lesion_mask", lesion), ("gland_mask", gland)] + ([("zone_mask", zone)] if zone is not None else [])
+                for name, m in pairs:
                     out[name].append(resize(m[z, y0:y1, x0:x1].astype(np.float32), (S, S), order=0,
                                             preserve_range=True, anti_aliasing=False).astype(np.uint8))
             n_kept += 1

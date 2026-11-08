@@ -95,6 +95,29 @@ def main():
                     "float": f"PatchCore-like {lab} float kNN, unsigned",
                     "combo": f"smoothed (HBV-ADC)/2 z + w x HDnn {lab} HDC 256 z"}, pick_combo=True)
 
+    SOLO.update({(r, v): t for r in ("sup_stats_zone", "sup_stats_grid", "sup_resnet_l2l3_zone", "sup_resnet_l2l3_grid")
+                 for v, t in (("proto256", "~10 s"), ("proto256_negplus", "~12 s"), ("vote256", "~9 s"),
+                              ("vote256_negplus", "~11 s"), ("hdc256_signed", "~10 s"), ("smooth_mix", "1 s"))})
+    for root, lab in (("sup_stats_zone", "mean+std, zone bins"), ("sup_stats_grid", "mean+std, grid bins"),
+                      ("sup_resnet_l2l3_zone", "ResNet-18 layer2+3, zone bins"),
+                      ("sup_resnet_l2l3_grid", "ResNet-18 layer2+3, grid bins")):
+        sweep_rows(root, f"Design A: supervised two-memory HDC ({lab})",
+                   {"proto256": f"HDC prototypes + retraining, normal = negatives ({lab})",
+                    "proto256_negplus": f"HDC prototypes + retraining, normal = negatives + non-lesion of positives ({lab})",
+                    "vote256": f"HDC kNN vote over labelled library ({lab})",
+                    "vote256_negplus": f"HDC kNN vote, + non-lesion of positives ({lab})"})
+    pb = "results/patient_hdc_stats_zone/summary.json"
+    if os.path.exists(pb):
+        B = json.load(open(pb))
+        for name, r in B["summary"].items():
+            pa = r["patient_auroc"]; pc = r.get("picai_score", [None, None])
+            ROWS.append(dict(group="Design B: HDDB-style patient record HV (image field from A: proto256_negplus, zone)",
+                             method=("image max score as-is (no record), for reference" if name == "image_score_raw_auroc"
+                                     else f"record fields: {name}"),
+                             slice_auroc=(None, None), voxel_auroc=(None, None), patient_auroc=tuple(pa),
+                             lesion_ap=(None, None), picai=tuple(pc) if pc[0] is not None else (None, None),
+                             runtime="~5 min (incl. 3-fold cross-fit)", setting="D = 2048, 16 levels, 20 retraining epochs"))
+
     lines = ["| group | method | slice AUROC | voxel AUROC (gland) | patient AUROC | lesion AP | PI-CAI score | runtime / seed | chosen setting |",
              "|---|---|---|---|---|---|---|---|---|"]
     for r in ROWS:
@@ -104,7 +127,9 @@ def main():
           "\n\nRuntime = encode + index + score of val and test per seed (map methods); candidate extraction and "
           "picai_eval add ~30-60 s. ResNet-18 feature maps for all 4,383 slices: 17 s (layer2) / 21 s (layer2+3), once. "
           "Combined score: the table shows the best w > 0 on val; including w = 0 (intensity alone, val AP 0.663), "
-          "val picks w = 0 in every case, so the HDC term is not supported by val. Whole-slice runs: 8 s (pixels), 32 s (stats), ~2 min (resnet) per seed, "
+          "val picks w = 0 in every case, so the HDC term is not supported by val. Design B PI-CAI = (B patient AUROC + "
+          "lesion AP of design A proto256_negplus zone maps) / 2, which is what picai_eval gives with B as the case score. "
+          "Whole-slice runs: 8 s (pixels), 32 s (stats), ~2 min (resnet) per seed, "
           "feature extraction included.\n")
     os.makedirs("results", exist_ok=True)
     open("results/final_summary.md", "w").write(md)

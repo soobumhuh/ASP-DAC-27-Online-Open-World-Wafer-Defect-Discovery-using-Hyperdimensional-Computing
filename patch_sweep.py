@@ -52,6 +52,7 @@ def main():
     ap.add_argument("--raw_variants", default="raw_adc,raw_hbv,raw_mix")
     ap.add_argument("--descriptor", default="stats")
     ap.add_argument("--parallel", type=int, default=3, help="patch_anomaly.py processes at once")
+    ap.add_argument("--extra", default="", help="extra arguments passed to every patch_anomaly.py run")
     ap.add_argument("--aggregate_only", action="store_true")
     args = ap.parse_args()
     root = os.path.join("results", args.root)
@@ -67,7 +68,7 @@ def main():
                 os.makedirs(out, exist_ok=True)
                 cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", args.slices_npz, "--seed", str(s),
                        "--patch", str(P), "--stride", str(st), "--descriptor", args.descriptor,
-                       "--variants", variants, "--save_root", out, "--workers", str(max(8, 96 // args.parallel))]
+                       "--variants", variants, "--save_root", out, "--workers", str(max(8, 96 // args.parallel))] + args.extra.split()
                 jobs.append((cmd, os.path.join(out, "log.txt")))
         with ThreadPoolExecutor(args.parallel) as ex:
             for f in [ex.submit(run, c, l) for c, l in jobs]:

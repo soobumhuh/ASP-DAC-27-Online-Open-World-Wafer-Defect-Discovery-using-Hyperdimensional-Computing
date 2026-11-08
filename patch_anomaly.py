@@ -48,6 +48,16 @@ from picai_bundle import split_patients
 from wafer_hdc_encoding import BinaryThermometerHDC, apply_clip, apply_standardize, fit_clip_stats, fit_standardize
 
 
+def rebin(d: dict, sl: np.ndarray, ys: np.ndarray, xs: np.ndarray, mode: str):
+    """Position bins. grid: slice level (3) x in-plane 3 x 3 grid of the crop = 27.
+    zone: slice level (3) x zone at the patch centre (0 = unlabelled, 1 = PZ, 2 = TZ; AI zonal mask) = 9."""
+    S = d["images"].shape[-1]
+    zl = np.minimum((d["rel_z"][sl] * 3).astype(int), 2)
+    if mode == "zone":
+        return zl * 3 + d["zone_mask"][sl, ys, xs].astype(np.int64)
+    return zl * 9 + np.minimum(ys * 3 // S, 2) * 3 + np.minimum(xs * 3 // S, 2)
+
+
 # ---------------------------------------------------------------- patches
 def patch_grid(S: int, P: int, stride: int) -> np.ndarray:
     h = P // 2
@@ -329,6 +339,18 @@ def main():
                     help="patch descriptor: flattened 3-channel pixels and/or per-channel mean/std, or frozen "
                          "ResNet-18 feature maps at the patch centre (resnet_l2 | resnet_l3 | resnet_l2l3)")
     ap.add_argument("--feature_cache", default="./mri_feature_cache")
+    ap.add_argument("--bin_mode", choices=["grid", "zone"], default="grid",
+                    help="grid: 3 slice levels x 3x3 in-plane grid (27 bins); zone: 3 slice levels x AI zone "
+                         "(PZ / TZ / unlabelled) at the patch centre (9 bins; needs zone_mask in the npz)")
+    ap.add_argument("--sup_k", type=int, default=25, help="neighbours for the supervised kNN vote")
+    ap.add_argument("--split_file", default=None,
+                    help="json {train: [patient ids], val: [...], test: [...]} overriding the seeded split "
+                         "(used by patient_hdc.py to cross-fit image scores on train patients)")
+    ap.add_argument("--dump_cases", default=None,
+                    help="npz path: per case (study) of val and test, the max of the map and the hypervectors of "
+                         "its top-5 patches, for the first variant (patient_hdc.py)")
+    ap.add_argument("--skip_eval", action="store_true", help="no detection / picai_eval (with --dump_cases)")
+    ap.add_argument("--sup_epochs", type=int, default=5, help="HDC retraining epochs for proto variants")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--bin_cap", type=int, default=50000, help="random cap on normal patches stored per bin")
     ap.add_argument("--num_bins", type=int, default=8, help="HDC thermometer levels")
@@ -357,6 +379,10 @@ def main():
     split_keep = (d["lesion_pixels"] >= args.min_lesion_pixels) | (cspca == 0)
     split_of = split_patients(pids[split_keep], cspca[split_keep], args.val_frac, args.test_frac, rng)
     split = np.array([split_of.get(int(p), "none") for p in pids])
+    if args.split_file:
+        sf = json.load(open(args.split_file))
+        lut = {int(p): k for k in ("train", "val", "test") for p in sf[k]}
+        split = np.array([lut.get(int(p), "none") for p in pids])
     has_lesion = d["lesion_mask"].reshape(len(pids), -1).sum(1) > 0
     counts = {s: {"patients": int(len(np.unique(pids[split == s]))),
                   "patients_pos": int(len(np.unique(pids[(split == s) & (cspca == 1)]))),
@@ -367,6 +393,13 @@ def main():
     idx = {"train_normal": np.where((split == "train") & (cspca == 0))[0],
            "val": np.where(split == "val")[0], "test": np.where(split == "test")[0]}
     val_neg_slice = cspca[idx["val"]] == 0
+    variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+    supervised = any(v.startswith(("proto", "vote")) for v in variants)
+    if supervised:
+        idx["train_pos"] = np.where((split == "train") & (cspca == 1))[0]
+    if args.bin_mode == "zone" and "zone_mask" not in d:
+        raise SystemExit("--bin_mode zone needs zone_mask: rebuild with picai_slices.py --save_masks --zonal_dir ...")
+    NB = 9 if args.bin_mode == "zone" else 27
 
     t0 = time.time()
     add_stats, add_pixels = "stats" in args.descriptor, "pixels" in args.descriptor
@@ -378,6 +411,8 @@ def main():
     P = {name: extract_patches(d, ix, args.patch, args.stride, add_stats, add_pixels, fmaps)
          for name, ix in idx.items()}
     del fmaps
+    if args.bin_mode != "grid":
+        P = {k: (*v[:4], rebin(d, v[1], v[2], v[3], args.bin_mode), *v[5:]) for k, v in P.items()}
     t_extract = time.time() - t0
     for name, v in P.items():
         print(f"{name}: {len(v[0])} patches, dim {v[0].shape[1]}")
@@ -402,7 +437,7 @@ def main():
         keep[j] = True
     if capped:
         print(f"capped bins to {args.bin_cap} (original sizes): {capped}")
-    bin_sizes = {int(b): int((btr[keep] == b).sum()) for b in range(27)}
+    bin_sizes = {int(b): int((btr[keep] == b).sum()) for b in range(NB)}
     Xtr, btr = prep(Ftr[keep]), btr[keep]
     X = {s: prep(P[s][0]) for s in ("val", "test")}
     # patch-mean intensities in standardised units (train-normal mean/std), for the signed and _int variants
@@ -410,19 +445,73 @@ def main():
     m_mu, m_sd = Mtr_raw.mean(0), Mtr_raw.std(0) + 1e-6
     Mstd = {"train": (Mtr_raw - m_mu) / m_sd, **{s: (P[s][5] - m_mu) / m_sd for s in ("val", "test")}}
     mix = {k: (v[:, 2] - v[:, 1]) / 2 for k, v in Mstd.items()}  # (HBV - ADC) / 2, lesion direction = up
-    mix_mu = np.full(27, mix["train"].mean()); mix_sd = np.full(27, mix["train"].std() + 1e-6)
+    mix_mu = np.full(NB, mix["train"].mean()); mix_sd = np.full(NB, mix["train"].std() + 1e-6)
     for b in np.unique(btr):
         mix_mu[b], mix_sd[b] = mix["train"][btr == b].mean(), mix["train"][btr == b].std() + 1e-6
     bins_of = {"train": btr, "val": P["val"][4], "test": P["test"][4]}
     mix_z = {k: (mix[k] - mix_mu[bins_of[k]]) / mix_sd[bins_of[k]] for k in mix}  # per-bin z vs train normals
 
     def zscore_per_bin(sv, bv, scores, bins):
-        mu_b = np.full(27, sv.mean()); sd_b = np.full(27, sv.std() + 1e-6)
+        mu_b = np.full(NB, sv.mean()); sd_b = np.full(NB, sv.std() + 1e-6)
         for b in np.unique(bv):
             mu_b[b], sd_b[b] = sv[bv == b].mean(), sv[bv == b].std() + 1e-6
         return (scores - mu_b[bins]) / sd_b[bins]
 
     knn_cache = {}
+    last_codes = {}
+
+    def sup_z(kind: str, nproj: int, negplus: bool):
+        """Design A: supervised HDC per bin (proto = sub-prototypes + retraining; vote = labelled kNN)."""
+        from hdc_classifier import HDCPrototypeClassifier, bipolar, knn_vote_scores, unpack_codes
+        enc = BinaryThermometerHDC(in_dim=Xtr.shape[1], num_proj=nproj, num_bins=args.num_bins,
+                                   seed=args.seed, clip_value=args.clip_value).fit(Xtr)
+        Fp, slp, yp, xp, bp = P["train_pos"][:5]
+        les = d["lesion_mask"][slp, yp, xp] > 0
+        C = {"n": hdc_codes(enc, Xtr), "l": hdc_codes(enc, prep(Fp[les])),
+             "val": hdc_codes(enc, X["val"]), "test": hdc_codes(enc, X["test"])}
+        B = {"n": btr, "l": bp[les], "val": bins_of["val"], "test": bins_of["test"]}
+        if negplus:  # also non-lesion gland patches of csPCa-positive train patients as 'normal'
+            nl = np.where(~les)[0]
+            nl = np.random.default_rng(args.seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
+            C["n"] = np.concatenate([C["n"], hdc_codes(enc, prep(Fp[nl]))]); B["n"] = np.concatenate([B["n"], bp[nl]])
+        group = (lambda b: b % 3) if args.bin_mode == "zone" else (lambda b: b % 9)  # same zone / same grid cell
+        sc = {s: np.zeros(len(C[s])) for s in ("val", "test")}
+        n_fallback = 0
+        for b in range(NB):
+            qs = {s: B[s] == b for s in ("val", "test")}
+            if not any(q.any() for q in qs.values()):
+                continue
+            mn = B["n"] == b
+            if mn.sum() == 0:
+                mn = np.ones(len(B["n"]), bool)
+            ml = B["l"] == b
+            if ml.sum() < 50:  # too few lesion patches here: pool lesions from the same zone (or grid cell), then all
+                n_fallback += 1
+                ml = group(B["l"]) == group(b)
+                if ml.sum() < 50:
+                    ml = np.ones(len(B["l"]), bool)
+            if kind == "proto":
+                Xn, Xl = bipolar(unpack_codes(C["n"][mn], enc.bit_dim)), bipolar(unpack_codes(C["l"][ml], enc.bit_dim))
+                clf = HDCPrototypeClassifier(epochs=args.sup_epochs, seed=args.seed + b).fit(
+                    np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
+                for s, q in qs.items():
+                    if q.any():
+                        sc[s][q] = clf.score(bipolar(unpack_codes(C[s][q], enc.bit_dim)))
+            else:
+                jn = np.where(mn)[0]
+                if len(jn) > 20000:
+                    jn = np.random.default_rng(args.seed + b).choice(jn, 20000, replace=False)
+                lib = np.concatenate([C["n"][jn], C["l"][ml]])
+                ly = np.r_[np.zeros(len(jn), int), np.ones(int(ml.sum()), int)]
+                for s, q in qs.items():
+                    if q.any():
+                        sc[s][q] = knn_vote_scores(lib, ly, C[s][q], enc.bit_dim, args.sup_k)
+        z = {s: zscore_per_bin(sc["val"][val_normal_patch], bins_of["val"][val_normal_patch], sc[s], bins_of[s])
+             for s in sc}
+        last_codes.update(val=C["val"], test=C["test"])
+        meta = {**enc.meta(), "supervised": kind, "negplus": negplus, "train_lesion_patches": int(les.sum()),
+                "bins_with_pooled_lesions": n_fallback, "bin_mode": args.bin_mode}
+        return z, meta
 
     def knn_z(base: str, mod: str):
         """Per-bin z-scored patch scores {val, test} for a kNN variant (cached so combo variants reuse them)."""
@@ -461,7 +550,7 @@ def main():
         knn_cache[key] = (z, meta)
         return knn_cache[key]
 
-    for variant in [v.strip() for v in args.variants.split(",") if v.strip()]:
+    for variant in variants:
         t0 = time.time()
         meta = {}
         if variant.startswith("raw_"):
@@ -481,6 +570,10 @@ def main():
                 sv, bv = raw["val"][val_normal_patch], P["val"][4][val_normal_patch]
                 z = {s: zscore_per_bin(sv, bv, raw[s], P[s][4]) for s in raw}
                 meta = {"encoder": "none (patch-mean intensity)"}
+            elif variant.startswith(("proto", "vote")):
+                kind = "proto" if variant.startswith("proto") else "vote"
+                base, _, mod = variant.partition("_")
+                z, meta = sup_z(kind, int(base[len(kind):]), mod == "negplus")
             elif variant.startswith("combo"):
                 wstr, base = variant[5:].split("_", 1)
                 zk, meta = knn_z(base, "")
@@ -494,6 +587,27 @@ def main():
             maps = {s: score_maps(d, idx[s], P[s][1], P[s][2], P[s][3], z[s], args.patch) for s in z}
         t_score = time.time() - t0
 
+        if args.dump_cases and variant == variants[0]:
+            out = {}
+            for s in ("val", "test"):
+                st_slice = d["study_id"][idx[s]]
+                st_patch = d["study_id"][P[s][1]]
+                cases = np.unique(st_slice)
+                mx = np.array([np.nanmax(maps[s][st_slice == c]) for c in cases])
+                top = []
+                for c in cases:
+                    j = np.where(st_patch == c)[0]
+                    j = j[np.argsort(-z[s][j])[:5]]
+                    if "val" in last_codes and len(j):
+                        cc = last_codes[s][j]
+                        top.append(np.concatenate([cc, np.repeat(cc[-1:], 5 - len(cc), 0)]))
+                    else:
+                        top.append(np.zeros((5, 1), np.uint8))
+                out[f"{s}_study"], out[f"{s}_max"], out[f"{s}_top"] = cases, mx, np.stack(top)
+            np.savez_compressed(args.dump_cases, **out)
+            print("dumped case scores ->", args.dump_cases)
+            if args.skip_eval:
+                break
         t1 = time.time()
         res = {"variant": variant}
         # offsets / temperatures from the val split's csPCa-negative voxels (never test)
