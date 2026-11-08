@@ -351,6 +351,7 @@ def main():
                          "its top-5 patches, for the first variant (patient_hdc.py)")
     ap.add_argument("--skip_eval", action="store_true", help="no detection / picai_eval (with --dump_cases)")
     ap.add_argument("--sup_epochs", type=int, default=5, help="HDC retraining epochs for proto variants")
+    ap.add_argument("--sup_nsub", default="10,5", help="sub-prototypes per class (normal,lesion) for proto variants")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--bin_cap", type=int, default=50000, help="random cap on normal patches stored per bin")
     ap.add_argument("--num_bins", type=int, default=8, help="HDC thermometer levels")
@@ -492,7 +493,8 @@ def main():
                     ml = np.ones(len(B["l"]), bool)
             if kind == "proto":
                 Xn, Xl = bipolar(unpack_codes(C["n"][mn], enc.bit_dim)), bipolar(unpack_codes(C["l"][ml], enc.bit_dim))
-                clf = HDCPrototypeClassifier(epochs=args.sup_epochs, seed=args.seed + b).fit(
+                clf = HDCPrototypeClassifier(n_sub=tuple(int(v) for v in args.sup_nsub.split(",")),
+                                             epochs=args.sup_epochs, seed=args.seed + b).fit(
                     np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
                 for s, q in qs.items():
                     if q.any():
@@ -604,6 +606,28 @@ def main():
                     else:
                         top.append(np.zeros((5, 1), np.uint8))
                 out[f"{s}_study"], out[f"{s}_max"], out[f"{s}_top"] = cases, mx, np.stack(top)
+                # per-zone fields (zone of a patch = zone at its centre; of a voxel = the zone mask)
+                if "zone_mask" in d:
+                    zm = d["zone_mask"][idx[s]]
+                    zp = d["zone_mask"][P[s][1], P[s][2], P[s][3]]
+                    ref = maps["val"][val_neg_slice]
+                    thr = float(np.nanpercentile(ref, 97))  # val csPCa-negative voxels, never test
+                    for zz, zn in ((1, "pz"), (2, "tz")):
+                        zmax, zcnt, ztop = [], [], []
+                        for c in cases:
+                            mc, zc = maps[s][st_slice == c], zm[st_slice == c] == zz
+                            v = mc[zc & ~np.isnan(mc)]
+                            zmax.append(float(v.max()) if len(v) else np.nan)
+                            zcnt.append(float((v > thr).sum()))
+                            j = np.where((st_patch == c) & (zp == zz))[0]
+                            j = j[np.argsort(-z[s][j])[:5]]
+                            if "val" in last_codes and len(j):
+                                cc = last_codes[s][j]
+                                ztop.append(np.concatenate([cc, np.repeat(cc[-1:], 5 - len(cc), 0)]))
+                            else:
+                                ztop.append(np.zeros((5, out[f"{s}_top"].shape[-1]), np.uint8))
+                        out[f"{s}_max_{zn}"], out[f"{s}_cnt_{zn}"] = np.array(zmax), np.array(zcnt)
+                        out[f"{s}_top_{zn}"] = np.stack(ztop)
             np.savez_compressed(args.dump_cases, **out)
             print("dumped case scores ->", args.dump_cases)
             if args.skip_eval:

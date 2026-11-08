@@ -44,12 +44,22 @@ from picai_bundle import split_patients
 
 NUMERIC = ["psad", "psa", "prostate_volume", "patient_age"]
 SYMBOL = ["center", "scanner", "bvalue"]
+IMG_NUM = ["img_max", "img_max_fine", "pz_max", "tz_max", "pz_cnt", "tz_cnt"]  # numeric image fields (level codes)
+IMG_TOP = {"img_top": "top", "pz_top": "top_pz", "tz_top": "top_tz"}           # bundled top-5 patch HVs
+ZONES = ["pz_max", "tz_max", "pz_cnt", "tz_cnt"]
 FIELD_SETS = {
     "clinical": NUMERIC + SYMBOL,
     "image_max": ["img_max"],
     "image_max+top5": ["img_max", "img_top"],
     "clinical+image_max": NUMERIC + SYMBOL + ["img_max"],
     "clinical+image_max+top5": NUMERIC + SYMBOL + ["img_max", "img_top"],
+    # finer image level code (--img_levels, quantile = rank within train) and per-zone image fields
+    "image_fine": ["img_max_fine"],
+    "clinical+image_fine": NUMERIC + SYMBOL + ["img_max_fine"],
+    "zones": ZONES,
+    "clinical+zones": NUMERIC + SYMBOL + ZONES,
+    "clinical+image_fine+zones": NUMERIC + SYMBOL + ["img_max_fine"] + ZONES,
+    "clinical+image_fine+zones+zone_top5": NUMERIC + SYMBOL + ["img_max_fine"] + ZONES + ["pz_top", "tz_top"],
 }
 
 
@@ -64,9 +74,9 @@ def scanner_info(images_dir: str) -> dict:
     return out
 
 
-def run_patch(args, seed, split, tag):
+def run_patch(args, name, split, tag, seed: int):
     """Run the design-A patch model with an explicit split; return its per-case dump."""
-    out_dir = os.path.join("results", args.root, f"seed{seed}")
+    out_dir = os.path.join("results", args.root, name)
     os.makedirs(out_dir, exist_ok=True)
     sf, dump = os.path.join(out_dir, f"split_{tag}.json"), os.path.join(out_dir, f"cases_{tag}.npz")
     if not os.path.exists(dump):
@@ -92,8 +102,13 @@ def main():
     ap.add_argument("--ap_summary", default=None,
                     help="patch_sweep summary.json + variant (path:variant) whose test lesion AP per seed is "
                          "paired with B's AUROC for the PI-CAI score")
+    ap.add_argument("--splits_json", default=None,
+                    help="json list of {name, train, val, test} patient-id splits used instead of --seeds "
+                         "(cv_hdc.py: the 5 official PI-CAI folds)")
+    ap.add_argument("--ap_json", default=None, help="json {split name: design-A test lesion AP} for the PI-CAI score")
     ap.add_argument("--D", type=int, default=2048, help="record dimension (= patch HV dimension for img_top)")
-    ap.add_argument("--levels", type=int, default=16)
+    ap.add_argument("--levels", type=int, default=16, help="levels for clinical numeric fields and img_max")
+    ap.add_argument("--img_levels", type=int, default=64, help="levels for img_max_fine and the per-zone fields")
     ap.add_argument("--epochs", type=int, default=20)
     args = ap.parse_args()
 
@@ -110,17 +125,34 @@ def main():
         path, var = args.ap_summary.rsplit(":", 1)
         ap_by_seed = json.load(open(path))[var]["test_per_seed"]["lesion_ap"]
 
+    if args.splits_json:
+        plan = [(i, sp["name"], {k: sorted(int(p) for p in sp[k]) for k in ("train", "val", "test")})
+                for i, sp in enumerate(json.load(open(args.splits_json)))]
+    else:
+        plan = []
+        for seed in (int(s) for s in args.seeds.split(",")):
+            so = split_patients(pids[split_keep], cspca[split_keep], 0.15, 0.25, np.random.default_rng(seed))
+            plan.append((seed, f"seed{seed}", {k: sorted(p for p, v in so.items() if v == k) for k in ("train", "val", "test")}))
+    ap_by_name = json.load(open(args.ap_json)) if args.ap_json else None
+
     results = {}
-    for si, seed in enumerate(int(s) for s in args.seeds.split(",")):
-        rng = np.random.default_rng(seed)
-        split_of = split_patients(pids[split_keep], cspca[split_keep], 0.15, 0.25, rng)
-        groups = {k: sorted(p for p, v in split_of.items() if v == k) for k in ("train", "val", "test")}
+    for si, (seed, sname, groups) in enumerate(plan):
+        split_of = {p: k for k, v in groups.items() for p in v}
         # image scores: val/test from the full-train model, train from 3-fold cross-fitting
         img = {}
-        base = run_patch(args, seed, groups, "base")
+        base = run_patch(args, sname, groups, "base", seed)
+        def take(dmp, s):
+            for i, c in enumerate(dmp[f"{s}_study"]):
+                r = {"img_max": float(dmp[f"{s}_max"][i]), "top": dmp[f"{s}_top"][i]}
+                r["img_max_fine"] = r["img_max"]
+                for zn in ("pz", "tz"):
+                    if f"{s}_max_{zn}" in dmp:
+                        r[f"{zn}_max"] = float(dmp[f"{s}_max_{zn}"][i])
+                        r[f"{zn}_cnt"] = float(np.log1p(dmp[f"{s}_cnt_{zn}"][i]))
+                        r[f"top_{zn}"] = dmp[f"{s}_top_{zn}"][i]
+                img[int(c)] = r
         for s in ("val", "test"):
-            for c, m, t in zip(base[f"{s}_study"], base[f"{s}_max"], base[f"{s}_top"]):
-                img[int(c)] = (float(m), t)
+            take(base, s)
         tr = np.array(groups["train"])
         tr_pos = np.array([any(case_y[c] for c in case_ids if case_pid[c] == p) for p in tr])
         fold = np.zeros(len(tr), int)
@@ -129,9 +161,8 @@ def main():
             fold[np.random.default_rng(seed + 7).permutation(j)] = np.arange(len(j)) % 3
         for f in range(3):
             sp = {"train": tr[fold != f], "val": groups["val"], "test": tr[fold == f]}
-            dmp = run_patch(args, seed, sp, f"cf{f}")
-            for c, m, t in zip(dmp["test_study"], dmp["test_max"], dmp["test_top"]):
-                img[int(c)] = (float(m), t)
+            dmp = run_patch(args, sname, sp, f"cf{f}", seed)
+            take(dmp, "test")
 
         # records
         hv_rng = np.random.default_rng(1000 + seed)
@@ -140,23 +171,28 @@ def main():
         val_of = lambda c, f: (float(rows[int(c)][f]) if (rows[int(c)].get(f) or "").strip() else np.nan)
         sym_of = lambda c, f: (rows[int(c)].get("center", "NA") if f == "center"
                                else scan.get(int(c), ("NA", "NA"))[0 if f == "scanner" else 1])
-        keys = {f: hv_rng.integers(0, 2, D, dtype=np.uint8) for f in NUMERIC + SYMBOL + ["img_max", "img_top"]}
+        keys = {f: hv_rng.integers(0, 2, D, dtype=np.uint8) for f in NUMERIC + SYMBOL + IMG_NUM + list(IMG_TOP)}
         tie = hv_rng.integers(0, 2, D, dtype=np.uint8)
         enc = {}
         for f in NUMERIC:
             enc[f] = LevelEncoder(D, args.levels, hv_rng).fit(np.array([val_of(c, f) for c in cases["train"]]))
         for f in SYMBOL:
             enc[f] = SymbolEncoder(D, hv_rng).fit([sym_of(c, f) for c in cases["train"]])
-        enc["img_max"] = LevelEncoder(D, args.levels, hv_rng).fit(np.array([img[int(c)][0] for c in cases["train"]]))
+        has_zones = "pz_max" in img[int(cases["train"][0])]
+        for f in IMG_NUM:
+            if f in ZONES and not has_zones:
+                continue
+            L = args.levels if f == "img_max" else args.img_levels
+            enc[f] = LevelEncoder(D, L, hv_rng).fit(np.array([img[int(c)].get(f, np.nan) for c in cases["train"]]))
 
         def field_hv(f, cs):
             if f in NUMERIC:
                 return enc[f].encode(np.array([val_of(c, f) for c in cs]))
             if f in SYMBOL:
                 return enc[f].encode([sym_of(c, f) for c in cs])
-            if f == "img_max":
-                return enc[f].encode(np.array([img[int(c)][0] for c in cs]))
-            tops = np.stack([img[int(c)][1] for c in cs])  # (n, 5, bytes)
+            if f in IMG_NUM:
+                return enc[f].encode(np.array([img[int(c)].get(f, np.nan) for c in cs]))
+            tops = np.stack([img[int(c)][IMG_TOP[f]] for c in cs])  # (n, 5, bytes)
             if tops.shape[-1] * 8 < D:
                 raise SystemExit("img_top needs a supervised/HDC patch variant whose hypervectors have >= D bits")
             bits = unpack_codes(tops.reshape(-1, tops.shape[-1]), D).reshape(len(cs), 5, D)
@@ -164,30 +200,34 @@ def main():
 
         res_seed = {}
         y = {k: np.array([case_y[int(c)] for c in cases[k]]) for k in cases}
-        res_seed["image_score_raw_auroc"] = float(roc_auc_score(y["test"], [img[int(c)][0] for c in cases["test"]]))
+        res_seed["image_score_raw_auroc"] = float(roc_auc_score(y["test"], [img[int(c)]["img_max"] for c in cases["test"]]))
         for name, fields in FIELD_SETS.items():
-            H = {k: bundle([field_hv(f, cases[k]) ^ keys[f][None, :] for f in fields], tie) for k in ("train", "test")}
+            if not has_zones and any(f in ZONES or f in ("pz_top", "tz_top") for f in fields):
+                continue
+            H = {k: bundle([field_hv(f, cases[k]) ^ keys[f][None, :] for f in fields], tie) for k in ("train", "val", "test")}
             clf = HDCBinaryClassifier(epochs=args.epochs, seed=seed).fit(H["train"], y["train"])
             sc = clf.score(H["test"])
             au = float(roc_auc_score(y["test"], sc))
-            r = {"patient_auroc": au, "n_test_cases": int(len(sc)), "n_test_pos": int(y["test"].sum())}
-            if ap_by_seed is not None:
-                r["lesion_ap_from_A"] = float(ap_by_seed[si])
-                r["picai_score"] = (au + float(ap_by_seed[si])) / 2
+            r = {"patient_auroc": au, "val_auroc": float(roc_auc_score(y["val"], clf.score(H["val"]))),
+                 "n_test_cases": int(len(sc)), "n_test_pos": int(y["test"].sum())}
+            a_ap = (ap_by_name.get(sname) if ap_by_name else (ap_by_seed[si] if ap_by_seed is not None else None))
+            if a_ap is not None:
+                r["lesion_ap_from_A"] = float(a_ap)
+                r["picai_score"] = (au + float(a_ap)) / 2
             res_seed[name] = r
-            print(f"seed {seed} {name:28s} patient AUROC {au:.3f}" + (f"  PI-CAI {r['picai_score']:.3f}" if 'picai_score' in r else ""))
-        print(f"seed {seed} image max score as-is (no record): AUROC {res_seed['image_score_raw_auroc']:.3f}")
-        results[seed] = res_seed
+            print(f"{sname} {name:28s} patient AUROC {au:.3f}" + (f"  PI-CAI {r['picai_score']:.3f}" if 'picai_score' in r else ""))
+        print(f"{sname} image max score as-is (no record): AUROC {res_seed['image_score_raw_auroc']:.3f}")
+        results[sname] = res_seed
 
     summary = {}
-    for name in list(FIELD_SETS) + ["image_score_raw_auroc"]:
+    for name in [n for n in FIELD_SETS if n in results[next(iter(results))]] + ["image_score_raw_auroc"]:
         if name == "image_score_raw_auroc":
             v = [results[s][name] for s in results]
             summary[name] = {"patient_auroc": [float(np.mean(v)), float(np.std(v))]}
             continue
         summary[name] = {m: [float(np.mean([results[s][name][m] for s in results])),
                              float(np.std([results[s][name][m] for s in results]))]
-                         for m in results[next(iter(results))][name] if m in ("patient_auroc", "picai_score")}
+                         for m in results[next(iter(results))][name] if m in ("patient_auroc", "picai_score", "val_auroc")}
     out = os.path.join("results", args.root, "summary.json")
     json.dump({"args": vars(args), "per_seed": results, "summary": summary}, open(out, "w"), indent=2)
     for k, v in summary.items():

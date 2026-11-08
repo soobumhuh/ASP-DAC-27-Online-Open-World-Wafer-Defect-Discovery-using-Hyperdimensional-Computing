@@ -98,6 +98,12 @@ def main():
                     help="keep a slice only if prostate covers this fraction of the crop")
     ap.add_argument("--max_neg", type=int, default=0, help="cap on csPCa-negative cases (0 = all found)")
     ap.add_argument("--max_pos", type=int, default=0, help="cap on csPCa-positive cases (0 = all found)")
+    ap.add_argument("--patient_list", default=None,
+                    help="only these patients: a text file of zip entries or patient ids (e.g. the saved "
+                         "Zenodo file list of one fold)")
+    ap.add_argument("--ai_lesion_dir", default=None,
+                    help="csPCa-positive cases without an expert lesion mask use this AI mask instead (e.g. "
+                         "<labels>/csPCa_lesion_delineations/AI/Bosma22a); lesion_source records 1 = expert, 2 = AI")
     ap.add_argument("--zonal_dir", default=None,
                     help="with --save_masks: folder of AI zonal masks (e.g. <labels>/anatomical_delineations/"
                          "zonal_pz_tz/AI/HeviAI23); adds zone_mask (1 = PZ, 2 = TZ)")
@@ -108,6 +114,10 @@ def main():
         raise SystemExit(f"{args.out} exists; refusing to overwrite")
 
     files = index_mha_files(args.images_dir)
+    if args.patient_list:
+        keep_p = {os.path.basename(l.strip()).split("_")[0].split("/")[0] for l in open(args.patient_list) if l.strip()}
+        keep_p |= {l.strip().split("/")[0] for l in open(args.patient_list) if l.strip()}
+        files = {k: v for k, v in files.items() if k.split("_")[0] in keep_p}
     with open(os.path.join(args.labels_dir, "clinical_information", "marksheet.csv")) as f:
         rows = [r for r in csv.DictReader(f) if f"{r['patient_id']}_{r['study_id']}" in files]
     print(f"{len(files)} cases on disk, {len(rows)} with marksheet rows")
@@ -132,6 +142,11 @@ def main():
             continue
         gland_p = os.path.join(args.labels_dir, "anatomical_delineations/whole_gland/AI/Bosma22b", key + ".nii.gz")
         lesion_p = lesion_mask_path(args.labels_dir, key)
+        source = 1 if lesion_p else 0
+        if pos and lesion_p is None and args.ai_lesion_dir:
+            ai_p = os.path.join(args.ai_lesion_dir, key + ".nii.gz")
+            if os.path.exists(ai_p):
+                lesion_p, source = ai_p, 2
         if not os.path.exists(gland_p) or (pos and lesion_p is None):
             print("skip (missing mask):", key)
             continue
@@ -169,6 +184,7 @@ def main():
             out["study_id"].append(int(r["study_id"]))
             out["slice_z"].append(z)
             out["case_cspca"].append(pos)
+            out.setdefault("lesion_source", []).append(source if pos else 0)
             out["case_isup"].append(int(r["case_ISUP"] or 0))
             out["lesion_pixels"].append(int(lesion[z, y0:y1, x0:x1].sum()))
             out["gland_pixels"].append(int(g.sum()))
