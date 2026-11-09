@@ -385,6 +385,10 @@ def main():
     ap.add_argument("--feature_cache", default="./mri_feature_cache")
     ap.add_argument("--slice_levels", type=int, default=3, help="slice-level bins (apex .. base)")
     ap.add_argument("--sup_lr", type=float, default=1.0, help="retraining step for proto variants")
+    ap.add_argument("--isup_weight", type=float, default=0.0,
+                    help="training weight of a lesion patch = (case ISUP - 1) ** isup_weight (training only, never an input)")
+    ap.add_argument("--hard_frac", type=float, default=0.0, help="hard-negative mining: share of normal patches mined")
+    ap.add_argument("--hard_nsub", type=int, default=0, help="hard-negative mining: extra normal sub-prototypes")
     ap.add_argument("--sup_balance", type=int, default=1, help="class-balanced retraining epochs (1) or all samples (0)")
     ap.add_argument("--label_rule", default="centre",
                     help="lesion patch = centre in the lesion mask ('centre') or lesion fraction >= f ('frac0.25')")
@@ -470,8 +474,12 @@ def main():
         # one cached layer2+3 map (memory-mapped); layer2 = channels 0-127, layer3 = 128-383
         os.makedirs(args.feature_cache, exist_ok=True)
         cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2l3.npy")
-        fmaps = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2l3"], cache)
-        fch = {"resnet_l2": slice(0, 128), "resnet_l3": slice(128, 384), "resnet_l2l3": None}[rn[0]]
+        if rn[0] == "resnet_l2" and not os.path.exists(cache):  # layer 2 only: a 3x smaller cache (disk quota)
+            cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2.npy")
+            fmaps, fch = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2"], cache), None
+        else:
+            fmaps = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2l3"], cache)
+            fch = {"resnet_l2": slice(0, 128), "resnet_l3": slice(128, 384), "resnet_l2l3": None}[rn[0]]
     P = {name: extract_patches(d, ix, args.patch, args.stride, add_stats, add_pixels, fmaps, add_pct, add_tex, fch)
          for name, ix in idx.items()}
     del fmaps
@@ -589,10 +597,15 @@ def main():
                     ml = np.ones(len(B["l"]), bool)
             if kind == "proto":
                 Xn, Xl = bipolar(unpack_codes(C["n"][mn], enc.bit_dim)), bipolar(unpack_codes(C["l"][ml], enc.bit_dim))
+                wl = None
+                if args.isup_weight > 0:
+                    isup = np.clip(d["case_isup"][slp[les]][ml], 2, 5).astype(float)
+                    wl = np.r_[np.ones(len(Xn)), (isup - 1) ** args.isup_weight]
                 clf = HDCPrototypeClassifier(n_sub=tuple(int(v) for v in args.sup_nsub.split(",")),
                                              epochs=args.sup_epochs, seed=args.seed + b, lr=args.sup_lr,
-                                             balance=bool(args.sup_balance), score_mode=args.score_mode).fit(
-                    np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
+                                             balance=bool(args.sup_balance), score_mode=args.score_mode,
+                                             hard_frac=args.hard_frac, hard_nsub=args.hard_nsub).fit(
+                    np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)], wl)
                 for s, q in qs.items():
                     if q.any():
                         sc[s][q] = clf.score(bipolar(unpack_codes(C[s][q], enc.bit_dim)))
@@ -747,7 +760,7 @@ def main():
                                     "zone": (d["zone_mask"][c["slices"]] if "zone_mask" in d else
                                              np.zeros_like(c["lesion"])).astype(np.uint8),
                                     "rel_z": d["rel_z"][c["slices"]].astype(np.float32)} for k, c in v.items()}
-                if s in last_codes:  # patch hypervectors + positions (row in the case volume, y, x) for re-scoring
+                if s in last_codes and os.environ.get("SAVE_CODES", "0") == "1":  # patch HVs + positions, for re-scoring
                     st_patch = d["study_id"][P[s][1]]
                     for k, c in v.items():
                         j = np.where(st_patch == k)[0]

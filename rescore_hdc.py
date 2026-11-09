@@ -41,7 +41,8 @@ _PP, _REF = {}, {}
 def _extract(item):
     """One case -> candidate list [(det-map value, voxel mask indices, features, patch-HV bundle)] + label info."""
     from report_guided_annotation import extract_lesion_candidates
-    key, c, off, temp, qgrid = item
+    key, c, off, temp, qgrid = item[:5]
+    offs = item[5] if len(item) > 5 else None  # zone-specific calibration offsets {zone: offset}
     p = {**pps.DEFAULT_PP, **_PP}
     m = c["map"].astype(np.float32)
     if p["sxy"] > 0 or p["sz"] > 0:
@@ -54,7 +55,12 @@ def _extract(item):
         prob = np.interp(np.nan_to_num(m, nan=-1e3), qgrid, np.linspace(0, 1, len(qgrid))) ** (1.0 / max(p["tf"], 1e-3))
         prob[np.isnan(m)] = 0
     else:
-        prob = expit((np.nan_to_num(m, nan=-1e3) - off) / temp)
+        o = off
+        if offs:
+            o = np.full(m.shape, off, np.float32)
+            for zz, oz in offs.items():
+                o[c["zone"] == zz] = oz
+        prob = expit((np.nan_to_num(m, nan=-1e3) - o) / temp)
     thr = p["mode"] if p["mode"] in ("dynamic", "dynamic-fast") else float(p["mode"])
     _, conf, idx = extract_lesion_candidates(prob.astype(np.float64), threshold=thr,
                                              min_voxels_detection=int(p["minvox"]), num_lesions_to_extract=int(p["nles"]),
@@ -97,8 +103,14 @@ def extract_all(maps, ref_maps, pp, workers=24):
                           for c in ref_maps.values() if c["cspca"] == 0])
     off, temp = float(np.percentile(ref, pp["q"])), float(pp["tf"] * ref.std() + 1e-6)
     qgrid = np.percentile(ref, np.linspace(0, 100, 1001))
+    offs = {}
+    for zz, qk in ((1, "q_pz"), (2, "q_tz")):
+        if pp.get(qk) is not None:
+            v = np.concatenate([c["map"][(c["zone"] == zz) & ~np.isnan(c["map"])].astype(np.float32)
+                                for c in ref_maps.values() if c["cspca"] == 0])
+            offs[zz] = float(np.percentile(v, pp[qk]))
     with get_context("fork").Pool(workers, initializer=_init, initargs=(pp,)) as pool:
-        out = pool.map(_extract, [(k, maps[k], off, temp, qgrid) for k in sorted(maps)])
+        out = pool.map(_extract, [(k, maps[k], off, temp, qgrid, offs) for k in sorted(maps)])
     return {k: (cands, shape) for k, cands, shape in out}
 
 

@@ -110,7 +110,7 @@ def main():
     ap_of = {f"fold{p['fold']}": p["lesion_ap"] for p in A}
     a_case = {f"fold{p['fold']}": p["patient_auroc"] for p in A}
 
-    results = {}
+    results, all_scores = {}, {}
     for si, sp in enumerate(json.load(open(args.splits))):
         name = sp["name"]
         img = load_split(args.dumps, name)
@@ -138,11 +138,14 @@ def main():
         sd = {"i": ims["train"].std() + 1e-9, "c": clin["train"].std() + 1e-9}
         z = lambda k, w: (ims[k] - mu["i"]) / sd["i"] + w * (clin[k] - mu["c"]) / sd["c"]
         r = lambda k, w: (rankdata(ims[k]) + w * rankdata(clin[k])) / (1 + w)
+        case_scores = {k: {"cases": cases[k], "y": y[k].tolist(), "img": ims[k].tolist()} for k in ("val", "test")}
         for label, f in (("merge_z", z), ("merge_rank", r)):
             ws = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0)
             vals = {w: auc(y["val"], f("val", w)) for w in ws}
             w = max(ws, key=lambda w: (vals[w], -w))
             st = f("test", w)
+            for k in ("val", "test"):
+                case_scores[k][label] = np.asarray(f(k, w), dtype=float).tolist()
             res[label] = {"test": auc(y["test"], st), "val": vals[w], "w": w,
                           "test_psad_present": auc(y["test"][psad_ok["test"]], st[psad_ok["test"]]),
                           "test_psad_missing": auc(y["test"][~psad_ok["test"]], st[~psad_ok["test"]])}
@@ -171,6 +174,7 @@ def main():
             res[k]["picai"] = (res[k]["test"] + ap_of[name]) / 2
         res["n_test"], res["n_test_psad"] = int(len(y["test"])), int(psad_ok["test"].sum())
         results[name] = res
+        all_scores[name] = case_scores
         print(name, {k: round(v["test"], 3) for k, v in res.items() if isinstance(v, dict)}, flush=True)
 
     keys = [k for k in results["fold0"] if isinstance(results["fold0"][k], dict)]
@@ -189,6 +193,7 @@ def main():
     md = "\n".join(lines)
     open(os.path.join(args.out, "table.md"), "w").write(md + "\n")
     json.dump(results, open(os.path.join(args.out, "results.json"), "w"), indent=2)
+    json.dump(all_scores, open(os.path.join(args.out, "case_scores.json"), "w"))
     print(md)
 
 

@@ -36,7 +36,7 @@ TUNED = ("--variants proto512_negplus --descriptor stats+resnet_l2 --patch 20 --
          "--bin_mode zone_grid --num_bins 4 --clip_value 4.0 --sup_nsub 20,5 --sup_epochs 20 --sup_lr 2.0 "
          "--sup_balance 1 --label_rule frac0.25 --bin_cap 50000 --score_mode lse0.02 --smooth_sigma 2.0").split()
 DEFAULT_PP = dict(sxy=0.0, sz=0.0, q=97.0, tf=0.5, mode="dynamic", factor=2.5, minvox=10, nles=5, adj=True, gamma=0.0,
-                  mapping="sigmoid", conf="max")
+                  mapping="sigmoid", conf="max", q_pz=None, q_tz=None)  # q_pz / q_tz: zone-specific calibration (idea 7)
 
 
 # ------------------------------------------------------------------ maps
@@ -78,6 +78,20 @@ def _from_config(path):
     return args
 
 
+# round 4: seed copies of #110 (idea 3) and hard-negative mining on #110 (idea 2)
+for _k in (1, 2, 3, 4):
+    MODELS[f"t110s{_k}"] = MODELS["t110"] + ["--seed", str(_k)]
+for _name, _f, _n in (("t110hn1", 0.02, 10), ("t110hn2", 0.05, 10), ("t110hn3", 0.01, 5)):
+    MODELS[_name] = MODELS["t110"] + ["--hard_frac", str(_f), "--hard_nsub", str(_n)]
+
+MODELS["t110isup"] = MODELS["t110"] + ["--isup_weight", "1.0"]                    # idea 8: grade-weighted lesions
+MODELS["t110p8"] = [a if a != "20" or MODELS["t110"][i - 1] != "--patch" else "8"     # idea 5: small-patch boundary model
+                    for i, a in enumerate(MODELS["t110"])]
+
+# idea 6: the #110 recipe on 128 x 128 crops (patch 20 -> 26 px to keep its physical size; stride 2)
+MODELS["t110r128"] = [("26" if a == "20" and MODELS["t110"][i - 1] == "--patch" else a) for i, a in enumerate(MODELS["t110"])]
+MODEL_NPZ = {"t110r128": "/data/picai_all_masks128.npz"}
+
 if os.path.exists("results/round3/config_t35.json"):
     MODELS["t35"] = _from_config("results/round3/config_t35.json")
 
@@ -85,7 +99,8 @@ if os.path.exists("results/round3/config_t35.json"):
 def make_maps(args):
     sp = splits()
     os.makedirs(ROOT, exist_ok=True)
-    jobs = [(m, n) for m in args.models.split(",") for n in sp]
+    keep = set(args.splits.split(",")) if args.splits else set(sp)
+    jobs = [(m, n) for m in args.models.split(",") for n in sp if n in keep]
 
     def run(job):
         model, name = job
@@ -96,7 +111,7 @@ def make_maps(args):
             return
         sf = os.path.join(out, "split.json")
         json.dump(sp[name], open(sf, "w"))
-        cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", NPZ, "--split_file", sf, "--save_root", out,
+        cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", MODEL_NPZ.get(model, NPZ), "--split_file", sf, "--save_root", out,
                "--save_maps", pk, "--eval_splits", "none", "--workers", "8"] + MODELS[model]
         env = {**os.environ, "OMP_NUM_THREADS": "24", "OPENBLAS_NUM_THREADS": "24"}
         with open(os.path.join(out, "log.txt"), "w") as fh:
@@ -116,7 +131,8 @@ def _process(item):
     from report_guided_annotation import extract_lesion_candidates
     from scipy.ndimage import gaussian_filter
     from scipy.special import expit
-    m, off, temp, qgrid = item
+    m, off, temp, qgrid = item[:4]
+    zoff = item[4] if len(item) > 4 else None  # (zone volume, {zone: offset}) for zone-specific calibration
     p = {**DEFAULT_PP, **_PP}
     m = m.astype(np.float32)
     if p["sxy"] > 0 or p["sz"] > 0:
@@ -130,7 +146,13 @@ def _process(item):
         prob = (e ** (1.0 / max(p["tf"], 1e-3))).astype(np.float64)
         prob[np.isnan(m)] = 0
     else:
-        prob = expit((np.nan_to_num(m, nan=-1e3) - off) / temp).astype(np.float64)
+        o = off
+        if zoff is not None:
+            zv, offs = zoff
+            o = np.full(m.shape, off, np.float32)
+            for zz, oz in offs.items():
+                o[zv == zz] = oz
+        prob = expit((np.nan_to_num(m, nan=-1e3) - o) / temp).astype(np.float64)
     thr = p["mode"] if p["mode"] in ("dynamic", "dynamic-fast") else float(p["mode"])
     det, conf, idx = extract_lesion_candidates(prob, threshold=thr, min_voxels_detection=int(p["minvox"]),
                                                num_lesions_to_extract=int(p["nles"]),
@@ -159,9 +181,19 @@ def evaluate(maps: dict, ref_maps: dict, pp: dict, workers: int = 16) -> dict:
                           for c in ref_maps.values() if c["cspca"] == 0])
     off, temp = float(np.percentile(ref, pp["q"])), float(pp["tf"] * ref.std() + 1e-6)
     qgrid = np.percentile(ref, np.linspace(0, 100, 1001))
+    offs = None
+    if pp.get("q_pz") is not None or pp.get("q_tz") is not None:  # zone-specific offsets from val-normal voxels
+        offs = {}
+        for zz, qk in ((1, "q_pz"), (2, "q_tz")):
+            if pp.get(qk) is None:
+                continue
+            v = np.concatenate([c["map"][(c["zone"] == zz) & ~np.isnan(c["map"])].astype(np.float32)
+                                for c in ref_maps.values() if c["cspca"] == 0])
+            offs[zz] = float(np.percentile(v, pp[qk]))
     keys = sorted(maps)
     with get_context("fork").Pool(workers, initializer=_init, initargs=(pp,)) as pool:
-        y_det = pool.map(_process, [(maps[k]["map"], off, temp, qgrid) for k in keys])
+        y_det = pool.map(_process, [(maps[k]["map"], off, temp, qgrid) + (((maps[k]["zone"], offs),) if offs else ())
+                                    for k in keys])
     m = pe(y_det=y_det, y_true=[maps[k]["lesion"].astype(np.int32) for k in keys],
            subject_list=[str(k) for k in keys], num_parallel_calls=workers)
     return {"patient_auroc": float(m.auroc), "lesion_ap": float(m.AP), "picai_score": float(m.score)}
@@ -270,6 +302,7 @@ def main():
     ap.add_argument("mode", choices=["maps", "search", "status", "final"])
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--models", default="t119,intensity")
+    ap.add_argument("--splits", default="", help="maps: only these splits (e.g. inner1,inner2)")
     ap.add_argument("--model", default="t119", help="which saved maps to search / finalise")
     ap.add_argument("--pp_json", default=None, help="final: use this post-processing setting instead of the search's best")
     ap.add_argument("--trials", type=int, default=200)

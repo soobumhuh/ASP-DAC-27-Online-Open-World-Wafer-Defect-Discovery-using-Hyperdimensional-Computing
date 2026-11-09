@@ -44,12 +44,15 @@ def majority(counts: np.ndarray) -> np.ndarray:
 # ------------------------------------------------------------------ design A: prototypes + retraining
 class HDCPrototypeClassifier:
     def __init__(self, n_sub=(10, 5), epochs: int = 5, kmeans_iter: int = 5, batch: int = 2048, seed: int = 0,
-                 lr: float = 1.0, balance: bool = True, score_mode: str = "max"):
+                 lr: float = 1.0, balance: bool = True, score_mode: str = "max",
+                 hard_frac: float = 0.0, hard_nsub: int = 0):
         self.n_sub, self.epochs, self.kmeans_iter, self.batch = n_sub, epochs, kmeans_iter, batch
         self.lr, self.balance, self.score_mode = lr, balance, score_mode
+        self.hard_frac, self.hard_nsub = hard_frac, hard_nsub
+        self.w = None
         self.rng = np.random.default_rng(seed)
 
-    def _kmeans(self, Xb: np.ndarray, k: int) -> np.ndarray:
+    def _kmeans(self, Xb: np.ndarray, k: int, w: np.ndarray = None) -> np.ndarray:
         k = max(1, min(k, len(Xb)))
         C = Xb[self.rng.choice(len(Xb), k, replace=False)].copy()
         for _ in range(self.kmeans_iter):
@@ -57,18 +60,41 @@ class HDCPrototypeClassifier:
             for j in range(k):
                 m = a == j
                 if m.any():
-                    C[j] = Xb[m].sum(0)
+                    C[j] = Xb[m].sum(0) if w is None else (Xb[m] * w[m, None]).sum(0)
         return C  # bipolar counts (n_sub, D)
 
-    def fit(self, Xb: np.ndarray, y: np.ndarray):
-        """Xb: (n, D) bipolar float32; y: 0 = normal, 1 = lesion."""
-        self.counts = [self._kmeans(Xb[y == c], self.n_sub[c]) for c in (0, 1)]
+    def fit(self, Xb: np.ndarray, y: np.ndarray, w: np.ndarray = None):
+        """Xb: (n, D) bipolar float32; y: 0 = normal, 1 = lesion.
+        hard_frac > 0: hard-negative mining. After the first retraining pass, the normal patches that score most
+        like lesions (top hard_frac) are clustered into hard_nsub extra NORMAL sub-prototypes ('mimics': benign
+        tissue that looks like cancer) and a second retraining pass runs with those mimics over-sampled."""
+        self.w = w  # optional per-sample training weight (lesion grade); used in k-means and as sampling weight
+        self.counts = [self._kmeans(Xb[y == c], self.n_sub[c], None if w is None else w[y == c]) for c in (0, 1)]
+        self._retrain(Xb, y, None)
+        if self.hard_frac > 0 and self.hard_nsub > 0 and (y == 0).sum() > 10:
+            self.protos = [majority(c) for c in self.counts]
+            n_idx = np.where(y == 0)[0]
+            s = self.score(Xb[n_idx])
+            k = max(self.hard_nsub, int(self.hard_frac * len(n_idx)))
+            hard = n_idx[np.argsort(-s)[:k]]
+            self.counts[0] = np.concatenate([self.counts[0], self._kmeans(Xb[hard], self.hard_nsub)])
+            self._retrain(Xb, y, hard)
+        self.protos = [majority(c) for c in self.counts]
+        return self
+
+    def _retrain(self, Xb, y, hard):
         idx = [np.where(y == c)[0] for c in (0, 1)]
         n_bal = min(len(idx[0]), max(len(idx[1]), 1) * 1)  # class-balanced epochs
         for _ in range(self.epochs):
-            if self.balance:
-                pick = np.concatenate([self.rng.choice(idx[0], n_bal, replace=False),
+            if hard is not None:  # half of the normal draws from the mined mimics
+                nh = min(len(hard), n_bal // 2)
+                pick = np.concatenate([self.rng.choice(hard, nh, replace=False),
+                                       self.rng.choice(idx[0], n_bal - nh, replace=False),
                                        self.rng.choice(idx[1], n_bal, replace=len(idx[1]) < n_bal)])
+            elif self.balance:
+                pl = None if self.w is None else self.w[idx[1]] / self.w[idx[1]].sum()
+                pick = np.concatenate([self.rng.choice(idx[0], n_bal, replace=False),
+                                       self.rng.choice(idx[1], n_bal, replace=pl is not None or len(idx[1]) < n_bal, p=pl)])
             else:
                 pick = np.arange(len(y))
             self.rng.shuffle(pick)
@@ -91,8 +117,6 @@ class HDCPrototypeClassifier:
                     m = wrong & (pred == c)
                     if m.any():
                         np.add.at(self.counts[c], S[c][m].argmax(1), -self.lr * X[m])
-        self.protos = [majority(c) for c in self.counts]
-        return self
 
     def _agg(self, S: np.ndarray) -> np.ndarray:
         """Similarity to a class from its sub-prototype similarities (S in [-1, 1])."""
