@@ -25,7 +25,7 @@ import time
 
 import numpy as np
 
-ROOT = "results/hp"
+ROOT = os.environ.get("HP_ROOT", "results/hp")
 NPZ = "/data/picai_all_masks.npz"
 DEFAULT = dict(patch=12, stride=4, slice_levels=3, bin_mode="zone", descriptor="stats", num_proj=256, num_bins=8,
                clip_value=3.0, nsub_n=10, nsub_l=5, epochs=5, lr=1.0, balance=1, label_rule="centre", negplus=0,
@@ -34,27 +34,32 @@ DESCRIPTORS = ["stats", "stats+pct", "stats+tex", "stats+pct+tex", "resnet_l2", 
                "stats+resnet_l2", "stats+pct+resnet_l3", "stats+pct+tex+resnet_l2l3"]
 
 
+FIX = {}       # parameters held fixed for a study (e.g. stride=2), set from --fix
+CHOICES = {}   # overridden choice lists, set from --patch_choices
+
+
 def suggest(trial) -> dict:
+    cat = lambda name, opts: trial.suggest_categorical(name, [FIX[name]] if name in FIX else CHOICES.get(name, opts))
     p = dict(
-        patch=trial.suggest_categorical("patch", [8, 12, 16, 20]),
-        stride=trial.suggest_categorical("stride", [2, 4, 6]),
-        slice_levels=trial.suggest_categorical("slice_levels", [1, 3, 5]),
-        bin_mode=trial.suggest_categorical("bin_mode", ["zone", "zone_grid"]),
-        descriptor=trial.suggest_categorical("descriptor", DESCRIPTORS),
-        num_proj=trial.suggest_categorical("num_proj", [128, 256, 512, 1024]),
-        num_bins=trial.suggest_categorical("num_bins", [4, 8, 16]),
-        clip_value=trial.suggest_categorical("clip_value", [2.0, 3.0, 4.0]),
-        nsub_n=trial.suggest_categorical("nsub_n", [5, 10, 20, 40]),
-        nsub_l=trial.suggest_categorical("nsub_l", [2, 5, 10, 20]),
-        epochs=trial.suggest_categorical("epochs", [0, 3, 5, 10, 20]),
-        lr=trial.suggest_categorical("lr", [0.25, 0.5, 1.0, 2.0]),
-        balance=trial.suggest_categorical("balance", [0, 1]),
-        label_rule=trial.suggest_categorical("label_rule", ["centre", "frac0.25", "frac0.5"]),
-        negplus=trial.suggest_categorical("negplus", [0, 1]),
-        bin_cap=trial.suggest_categorical("bin_cap", [20000, 50000, 100000]),
-        score_mode=trial.suggest_categorical("score_mode", ["max", "top2", "lse0.02", "lse0.05"]),
-        smooth_sigma=trial.suggest_categorical("smooth_sigma", [0.0, 1.0, 2.0, 3.0]),
-        det_threshold=trial.suggest_categorical("det_threshold", ["dynamic-fast", "dynamic"]),
+        patch=cat("patch", [8, 12, 16, 20]),
+        stride=cat("stride", [2, 4, 6]),
+        slice_levels=cat("slice_levels", [1, 3, 5]),
+        bin_mode=cat("bin_mode", ["zone", "zone_grid"]),
+        descriptor=cat("descriptor", DESCRIPTORS),
+        num_proj=cat("num_proj", [128, 256, 512, 1024]),
+        num_bins=cat("num_bins", [4, 8, 16]),
+        clip_value=cat("clip_value", [2.0, 3.0, 4.0]),
+        nsub_n=cat("nsub_n", [5, 10, 20, 40]),
+        nsub_l=cat("nsub_l", [2, 5, 10, 20]),
+        epochs=cat("epochs", [0, 3, 5, 10, 20]),
+        lr=cat("lr", [0.25, 0.5, 1.0, 2.0]),
+        balance=cat("balance", [0, 1]),
+        label_rule=cat("label_rule", ["centre", "frac0.25", "frac0.5"]),
+        negplus=cat("negplus", [0, 1]),
+        bin_cap=cat("bin_cap", [20000, 50000, 100000]),
+        score_mode=cat("score_mode", ["max", "top2", "lse0.02", "lse0.05"]),
+        smooth_sigma=cat("smooth_sigma", [0.0, 1.0, 2.0, 3.0]),
+        det_threshold=cat("det_threshold", ["dynamic-fast", "dynamic"]),
     )
     p["stride"] = min(p["stride"], p["patch"] // 2)  # stride <= patch / 2
     return p
@@ -100,12 +105,13 @@ def search(args):
     import optuna
     os.makedirs(ROOT, exist_ok=True)
     storage = f"sqlite:///{ROOT}/optuna.db"
-    study = optuna.create_study(study_name="designA", storage=storage, direction="maximize", load_if_exists=True,
+    study = optuna.create_study(study_name=args.study, storage=storage, direction="maximize", load_if_exists=True,
                                 sampler=optuna.samplers.TPESampler(seed=args.worker_seed, multivariate=True,
                                                                    n_startup_trials=20),
                                 pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=0))
     if args.worker_seed == 0 and len(study.trials) == 0:
-        study.enqueue_trial({k: v for k, v in DEFAULT.items()})  # the current defaults, as a reference trial
+        ref = dict(DEFAULT) if not args.reference else json.load(open(args.reference))
+        study.enqueue_trial({**ref, **FIX})  # reference trial (the current defaults, or a given config)
     fold = folds_of()
     pats = sorted(fold)
 
@@ -118,7 +124,8 @@ def search(args):
             split = {"train": [q for q in pats if fold[q] not in (0, vf)], "val": [q for q in pats if fold[q] == vf],
                      "test": [q for q in pats if fold[q] == vf][:5]}  # test unused (val-only evaluation)
             try:
-                res = run_one(p, split, os.path.join(ROOT, f"trial{trial.number:04d}", f"round{vf}"), "val",
+                tdir = f"trial{trial.number:04d}" if args.study == "designA" else f"{args.study}/trial{trial.number:04d}"
+                res = run_one(p, split, os.path.join(ROOT, tdir, f"round{vf}"), "val",
                               args.timeout)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 trial.set_user_attr("error", type(e).__name__)
@@ -141,7 +148,7 @@ def search(args):
 
 def status(args):
     import optuna
-    study = optuna.load_study(study_name="designA", storage=f"sqlite:///{ROOT}/optuna.db")
+    study = optuna.load_study(study_name=args.study, storage=f"sqlite:///{ROOT}/optuna.db")
     T = study.trials
     done = [t for t in T if t.state.name == "COMPLETE"]
     print(f"trials: {len(T)} total | complete {len(done)} | pruned {sum(t.state.name == 'PRUNED' for t in T)} | "
@@ -163,7 +170,7 @@ def status(args):
 def final(args):
     """Retrain the top configs on folds 1-4 (15% of them as internal val for settings) and test fold 0 once."""
     import optuna
-    study = optuna.load_study(study_name="designA", storage=f"sqlite:///{ROOT}/optuna.db")
+    study = optuna.load_study(study_name=args.study, storage=f"sqlite:///{ROOT}/optuna.db")
     done = sorted([t for t in study.trials if t.state.name == "COMPLETE"], key=lambda t: -t.value)
     picks = done[: args.top]
     if not any(t.number == 0 for t in picks):
@@ -185,14 +192,15 @@ def final(args):
     for t in picks:
         p = {**DEFAULT, **t.params}
         p["stride"] = min(p["stride"], p["patch"] // 2)
-        res = run_one(p, split, os.path.join(ROOT, "final", f"trial{t.number:04d}"), "val,test", 7200)
+        fdir = "final" if args.study == "designA" else f"final_{args.study}"
+        res = run_one(p, split, os.path.join(ROOT, fdir, f"trial{t.number:04d}"), "val,test", 7200)
         setting, _ = best_setting(res, "val")
         m = res["test"]["by_offset"][setting]
         rows.append({"trial": t.number, "inner_val_picai": t.value, "setting": setting,
                      "test_voxel_auroc": res["test"]["voxel_auroc_in_gland"], **{f"test_{k}": v for k, v in m.items()},
                      "config": p, "runtime_s": res["runtime_s"]})
         print(json.dumps(rows[-1]))
-    json.dump(rows, open(os.path.join(ROOT, "final", "fold0_test.json"), "w"), indent=2)
+    json.dump(rows, open(os.path.join(ROOT, fdir, "fold0_test.json"), "w"), indent=2)
 
 
 def main():
@@ -204,7 +212,16 @@ def main():
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--top", type=int, default=3)
     ap.add_argument("--importance", action="store_true")
+    ap.add_argument("--study", default="designA")
+    ap.add_argument("--fix", default="", help="comma list name=value held fixed, e.g. stride=2")
+    ap.add_argument("--patch_choices", default="", help="comma list of patch sizes to search")
+    ap.add_argument("--reference", default="", help="json config enqueued as trial 0")
     args = ap.parse_args()
+    for kv in filter(None, args.fix.split(",")):
+        k, v = kv.split("=")
+        FIX[k] = type(DEFAULT[k])(v) if not isinstance(DEFAULT[k], float) else float(v)
+    if args.patch_choices:
+        CHOICES["patch"] = [int(x) for x in args.patch_choices.split(",")]
     {"search": search, "status": status, "final": final}[args.mode](args)
 
 

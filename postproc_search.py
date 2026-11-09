@@ -70,6 +70,18 @@ MODELS = {"t119": TUNED, "t110": [a if a != "4" or TUNED[i - 1] != "--stride" el
           "t119core": [a if a != "frac0.25" else "frac0.75" for a in TUNED]}             # option c: lesion-core labels
 
 
+def _from_config(path):
+    """CLI for a saved hp_search trial config (round 3: stride-2 search)."""
+    import hp_search
+    cfg = {**hp_search.DEFAULT, **json.load(open(path))}
+    args, _ = hp_search.cli(cfg)
+    return args
+
+
+if os.path.exists("results/round3/config_t35.json"):
+    MODELS["t35"] = _from_config("results/round3/config_t35.json")
+
+
 def make_maps(args):
     sp = splits()
     os.makedirs(ROOT, exist_ok=True)
