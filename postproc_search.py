@@ -91,6 +91,10 @@ MODELS["t110p8"] = [a if a != "20" or MODELS["t110"][i - 1] != "--patch" else "8
 # idea 6: the #110 recipe on 128 x 128 crops (patch 20 -> 26 px to keep its physical size; stride 2)
 MODELS["t110r128"] = [("26" if a == "20" and MODELS["t110"][i - 1] == "--patch" else a) for i, a in enumerate(MODELS["t110"])]
 MODEL_NPZ = {"t110r128": "/data/picai_all_masks128.npz"}
+# idea 9: #110 recipe on a fine-tuned front end (one feature cache per split, mri_feature_cache/ft_<split>.npy)
+MODELS["t110ft"] = MODELS["t110"]
+for _k in (1, 2):
+    MODELS[f"t110fts{_k}"] = MODELS["t110"] + ["--seed", str(_k)]
 
 if os.path.exists("results/round3/config_t35.json"):
     MODELS["t35"] = _from_config("results/round3/config_t35.json")
@@ -112,7 +116,8 @@ def make_maps(args):
         sf = os.path.join(out, "split.json")
         json.dump(sp[name], open(sf, "w"))
         cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", MODEL_NPZ.get(model, NPZ), "--split_file", sf, "--save_root", out,
-               "--save_maps", pk, "--eval_splits", "none", "--workers", "8"] + MODELS[model]
+               "--save_maps", pk, "--eval_splits", "none", "--workers", "8"] + MODELS[model] + \
+              (["--fmap_cache", f"mri_feature_cache/ft_{name}.npy"] if model.startswith("t110ft") else [])
         env = {**os.environ, "OMP_NUM_THREADS": "24", "OPENBLAS_NUM_THREADS": "24"}
         with open(os.path.join(out, "log.txt"), "w") as fh:
             subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, check=True, env=env)

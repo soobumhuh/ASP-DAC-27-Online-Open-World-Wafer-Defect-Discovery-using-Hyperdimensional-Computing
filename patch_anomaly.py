@@ -383,6 +383,9 @@ def main():
                     help="patch descriptor: flattened 3-channel pixels and/or per-channel mean/std, or frozen "
                          "ResNet-18 feature maps at the patch centre (resnet_l2 | resnet_l3 | resnet_l2l3)")
     ap.add_argument("--feature_cache", default="./mri_feature_cache")
+    ap.add_argument("--fmap_cache", default=None,
+                    help="layer-2 feature maps (N, 128, 28, 28) to use for the resnet_l2 descriptor instead of the frozen "
+                         "ImageNet ones (e.g. a fine-tuned front end from hdnn_finetune.py)")
     ap.add_argument("--slice_levels", type=int, default=3, help="slice-level bins (apex .. base)")
     ap.add_argument("--sup_lr", type=float, default=1.0, help="retraining step for proto variants")
     ap.add_argument("--isup_weight", type=float, default=0.0,
@@ -474,7 +477,9 @@ def main():
         # one cached layer2+3 map (memory-mapped); layer2 = channels 0-127, layer3 = 128-383
         os.makedirs(args.feature_cache, exist_ok=True)
         cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2l3.npy")
-        if rn[0] == "resnet_l2" and not os.path.exists(cache):  # layer 2 only: a 3x smaller cache (disk quota)
+        if args.fmap_cache:  # fine-tuned front end (idea 9)
+            fmaps, fch = np.load(args.fmap_cache, mmap_mode="r"), None
+        elif rn[0] == "resnet_l2" and not os.path.exists(cache):  # layer 2 only: a 3x smaller cache (disk quota)
             cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2.npy")
             fmaps, fch = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2"], cache), None
         else:

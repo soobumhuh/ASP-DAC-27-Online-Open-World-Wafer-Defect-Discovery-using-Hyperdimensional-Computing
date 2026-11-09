@@ -138,7 +138,8 @@ def main():
         sd = {"i": ims["train"].std() + 1e-9, "c": clin["train"].std() + 1e-9}
         z = lambda k, w: (ims[k] - mu["i"]) / sd["i"] + w * (clin[k] - mu["c"]) / sd["c"]
         r = lambda k, w: (rankdata(ims[k]) + w * rankdata(clin[k])) / (1 + w)
-        case_scores = {k: {"cases": cases[k], "y": y[k].tolist(), "img": ims[k].tolist()} for k in ("val", "test")}
+        case_scores = {k: {"cases": cases[k], "y": y[k].tolist(), "img": ims[k].tolist(),
+                           "clin": np.asarray(clin[k], dtype=float).tolist()} for k in ("val", "test")}
         for label, f in (("merge_z", z), ("merge_rank", r)):
             ws = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0)
             vals = {w: auc(y["val"], f("val", w)) for w in ws}

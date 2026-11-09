@@ -23,13 +23,13 @@ dependencies = [
 [tool.uv]
 package = false   # a folder of scripts, not an installable package
 
-# CPU-only PyTorch: about 2 GB smaller than the default CUDA build. HDC needs no GPU.
-# If you later want the GPU build, delete the two sections below and run: uv sync
+# CUDA 12.8 PyTorch (Blackwell GPUs need cu128). The HDC code itself runs on CPU; the GPU is only used to
+# fine-tune the ResNet front end (HDnn). For a CPU-only machine, switch the index URL back to .../whl/cpu.
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
