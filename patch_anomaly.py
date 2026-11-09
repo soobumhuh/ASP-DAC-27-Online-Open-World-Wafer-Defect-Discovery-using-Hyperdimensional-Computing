@@ -84,9 +84,12 @@ def patch_fraction(mask: np.ndarray, sl, ys, xs, P: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- patches
+GRID_OFFSET = 0  # round 6: shifted patch grid (test-time-augmentation copies), set from --grid_offset
+
+
 def patch_grid(S: int, P: int, stride: int) -> np.ndarray:
     h = P // 2
-    return np.arange(h, S - (P - h) + 1, stride)
+    return np.arange(h + GRID_OFFSET, S - (P - h) + 1, stride)
 
 
 def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, add_stats: bool, add_pixels: bool = True,
@@ -334,7 +337,8 @@ RAW_M = {"adc": lambda M: -M[:, 1], "hbv": lambda M: M[:, 2], "mix": lambda M: (
 RESNET_LAYERS = {"resnet_l2": ("layer2",), "resnet_l3": ("layer3",), "resnet_l2l3": ("layer2", "layer3")}
 
 
-def resnet_feature_maps(images: np.ndarray, layers, cache: str = None, batch_size: int = 64) -> np.ndarray:
+def resnet_feature_maps(images: np.ndarray, layers, cache: str = None, batch_size: int = 64,
+                        device: str = "cpu") -> np.ndarray:
     """HDnn / PatchCore-style local features: frozen ImageNet ResNet-18, the 3-channel crop (T2W, ADC, HBV as RGB)
     upsampled to 224, layer2 (28 x 28, 128 ch) and/or layer3 (14 x 14, 256 ch, upsampled to 28 x 28),
     3 x 3 average-pooled for local context (as in PatchCore). Returns (N, D, 28, 28) float16."""
@@ -343,11 +347,11 @@ def resnet_feature_maps(images: np.ndarray, layers, cache: str = None, batch_siz
     import torch
     import torch.nn.functional as F
     from torchvision.models import resnet18, ResNet18_Weights
-    m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval()
+    m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval().to(device)
     outs = []
     with torch.no_grad():
         for i in range(0, len(images), batch_size):
-            x = torch.from_numpy(images[i:i + batch_size, :3].astype(np.float32))
+            x = torch.from_numpy(images[i:i + batch_size, :3].astype(np.float32)).to(device)
             x = F.interpolate(x, size=224, mode="bilinear", align_corners=False)
             x = m.maxpool(m.relu(m.bn1(m.conv1(x))))
             l2 = m.layer2(m.layer1(x))
@@ -355,11 +359,51 @@ def resnet_feature_maps(images: np.ndarray, layers, cache: str = None, batch_siz
             if "layer3" in layers:
                 feats["layer3"] = F.interpolate(m.layer3(l2), size=l2.shape[-1], mode="bilinear", align_corners=False)
             f = torch.cat([F.avg_pool2d(feats[k], 3, 1, 1) for k in layers], 1)
-            outs.append(f.numpy().astype(np.float16))
+            outs.append(f.cpu().numpy().astype(np.float16))
     out = np.concatenate(outs)
     if cache:
         np.save(cache, out)
     return out
+
+
+def augment_slices(d: dict, sl: np.ndarray, copies: int, seed: int) -> dict:
+    """Round 6 (U-Mamba MTL recipe, 2D): `copies` randomly transformed copies of the slices sl.
+    Per copy: left-right flip (p 0.5); rotation +-0.15 rad and isotropic scale x[0.8, 1.2] about the crop centre (p 0.5);
+    per-channel intensity scale x[0.9, 1.1] and shift +-0.1 (in the crop's z units); Gaussian noise sd U(0, 0.1) (p 0.2);
+    Gaussian smoothing sigma U(0.5, 1) (p 0.2). Images bilinear, masks nearest. Returns a slice dict like d."""
+    from scipy.ndimage import affine_transform, gaussian_filter
+    rng = np.random.default_rng(seed)
+    keys = [k for k in ("images", "gland_mask", "lesion_mask", "zone_mask") if k in d]
+    out = {k: [] for k in keys}
+    out["rel_z"], out["src"] = [], []
+    S = d["images"].shape[-1]
+    c = (S - 1) / 2
+    for _ in range(copies):
+        for i in sl:
+            flip = rng.random() < 0.5
+            if rng.random() < 0.5:
+                a, z = rng.uniform(-0.15, 0.15), rng.uniform(0.8, 1.2)
+                M = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]]) / z  # output -> input coordinates
+            else:
+                M = np.eye(2)
+            off = np.array([c, c]) - M @ np.array([c, c])
+            for k in keys:
+                x = np.asarray(d[k][i])
+                x = x[..., ::-1] if flip else x
+                if k == "images":
+                    x = np.stack([affine_transform(ch.astype(np.float32), M, off, order=1, mode="nearest") for ch in x])
+                    x = x * rng.uniform(0.9, 1.1, (len(x), 1, 1)) + rng.uniform(-0.1, 0.1, (len(x), 1, 1))
+                    if rng.random() < 0.2:
+                        x = x + rng.normal(0, rng.uniform(0, 0.1), x.shape)
+                    if rng.random() < 0.2:
+                        sg = rng.uniform(0.5, 1.0)
+                        x = np.stack([gaussian_filter(ch, sg) for ch in x])
+                    x = x.astype(np.float32)
+                else:
+                    x = affine_transform(x.astype(np.float32), M, off, order=0, mode="constant").astype(d[k].dtype)
+                out[k].append(x)
+            out["rel_z"].append(d["rel_z"][i]); out["src"].append(i)
+    return {k: np.stack(v) if k != "rel_z" else np.asarray(v) for k, v in out.items()}
 
 
 def main():
@@ -383,6 +427,20 @@ def main():
                     help="patch descriptor: flattened 3-channel pixels and/or per-channel mean/std, or frozen "
                          "ResNet-18 feature maps at the patch centre (resnet_l2 | resnet_l3 | resnet_l2l3)")
     ap.add_argument("--feature_cache", default="./mri_feature_cache")
+    ap.add_argument("--bag_seed", type=int, default=0,
+                    help="round 6: > 0 trains on a bootstrap sample of the training patients (unique patients drawn)")
+    ap.add_argument("--grid_offset", type=int, default=0, help="round 6: shift the patch grid by this many px")
+    ap.add_argument("--flip", type=int, default=0,
+                    help="round 6: mirror every slice left-right (images, masks, features); saved maps are flipped back")
+    ap.add_argument("--aug_lesion", type=int, default=0,
+                    help="round 6: augmented copies of every training slice with lesion pixels; their lesion patches "
+                         "are added to the lesion memory (U-Mamba MTL-style flips / affine / intensity / noise / blur)")
+    ap.add_argument("--aug_normal", type=float, default=0.0,
+                    help="round 6: also add clean (no lesion pixel) patches of the augmented slices to the normal memory, "
+                         "this many per augmented lesion patch (so 'augmented look' is not a lesion cue)")
+    ap.add_argument("--sup_update", default="perceptron", help="HDC retraining rule: perceptron | online (OnlineHD-style)")
+    ap.add_argument("--noise_proto", type=float, default=0.0, help="hardware study: share of prototype bits flipped")
+    ap.add_argument("--noise_query", type=float, default=0.0, help="hardware study: share of query HV bits flipped")
     ap.add_argument("--fmap_cache", default=None,
                     help="layer-2 feature maps (N, 128, 28, 28) to use for the resnet_l2 descriptor instead of the frozen "
                          "ImageNet ones (e.g. a fine-tuned front end from hdnn_finetune.py)")
@@ -436,6 +494,12 @@ def main():
 
     t_all = time.time()
     d = dict(np.load(args.slices_npz))
+    global GRID_OFFSET
+    GRID_OFFSET = args.grid_offset
+    if args.flip:
+        for k in ("images", "gland_mask", "lesion_mask", "zone_mask"):
+            if k in d:
+                d[k] = np.ascontiguousarray(d[k][..., ::-1])
     for key in ("gland_mask", "lesion_mask", "rel_z"):
         if key not in d:
             raise SystemExit(f"{args.slices_npz} has no '{key}': rebuild it with picai_slices.py --save_masks")
@@ -457,6 +521,11 @@ def main():
               for s in ("train", "val", "test")}
     counts["unsplit_patients"] = sorted({int(p) for p in pids[split == "none"]})
     print("split:", json.dumps(counts))
+    if args.bag_seed > 0:  # bootstrap of training patients: patients not drawn leave the training set
+        tr = np.unique(pids[split == "train"])
+        drawn = set(np.random.default_rng(1000 + args.bag_seed).choice(tr, len(tr), replace=True).tolist())
+        split = np.where((split == "train") & ~np.isin(pids, list(drawn)), "none", split)
+        print(f"bootstrap {args.bag_seed}: {len(drawn)} of {len(tr)} training patients drawn")
     idx = {"train_normal": np.where((split == "train") & (cspca == 0))[0],
            "val": np.where(split == "val")[0], "test": np.where(split == "test")[0]}
     val_neg_slice = cspca[idx["val"]] == 0
@@ -479,6 +548,9 @@ def main():
         cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2l3.npy")
         if args.fmap_cache:  # fine-tuned front end (idea 9)
             fmaps, fch = np.load(args.fmap_cache, mmap_mode="r"), None
+        elif args.flip:  # features of the mirrored images (layer 2 only)
+            cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_flip_resnet_l2.npy")
+            fmaps, fch = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2"], cache), None
         elif rn[0] == "resnet_l2" and not os.path.exists(cache):  # layer 2 only: a 3x smaller cache (disk quota)
             cache = os.path.join(args.feature_cache, f"{os.path.basename(args.slices_npz)}_resnet_l2.npy")
             fmaps, fch = resnet_feature_maps(d["images"], RESNET_LAYERS["resnet_l2"], cache), None
@@ -489,6 +561,23 @@ def main():
          for name, ix in idx.items()}
     del fmaps
     P = {k: (*v[:4], rebin(d, v[1], v[2], v[3], args.bin_mode, args.slice_levels), *v[5:]) for k, v in P.items()}
+    PA, d_aug = None, None
+    if args.aug_lesion > 0 and supervised:
+        if args.ctx3d or args.isup_weight > 0 or args.fmap_cache or args.flip or not (rn == ["resnet_l2"] or not rn):
+            raise SystemExit("--aug_lesion: only with the plain resnet_l2 / stats descriptors, no ctx3d / isup / flip")
+        tp = idx["train_pos"]
+        tp = tp[d["lesion_mask"][tp].reshape(len(tp), -1).sum(1) > 0]
+        d_aug = augment_slices(d, tp, args.aug_lesion, args.seed + 4242)
+        fa = None
+        if rn:
+            import torch
+            fa = resnet_feature_maps(d_aug["images"], RESNET_LAYERS["resnet_l2"], None,
+                                     device="cuda" if torch.cuda.is_available() else "cpu")
+        v = extract_patches(d_aug, np.arange(len(d_aug["rel_z"])), args.patch, args.stride, add_stats, add_pixels,
+                            fa, add_pct, add_tex, None)
+        PA = (*v[:4], rebin(d_aug, v[1], v[2], v[3], args.bin_mode, args.slice_levels))
+        del fa
+        print(f"augmentation: {len(tp)} lesion slices x {args.aug_lesion} copies -> {len(PA[0])} patches")
     t_extract = time.time() - t0
     for name, v in P.items():
         print(f"{name}: {len(v[0])} patches, dim {v[0].shape[1]}")
@@ -584,7 +673,24 @@ def main():
             nl = np.random.default_rng(args.seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
             C["n"] = np.concatenate([C["n"], full_p[nl] if full_p is not None else hdc_codes(enc, prep(Fp[nl]))])
             B["n"] = np.concatenate([B["n"], bp[nl]])
+        if PA is not None:  # augmented lesion patches -> lesion memory (+ optional augmented clean patches -> normal)
+            Fa, sla, ya, xa, ba = PA
+            if args.label_rule == "centre":
+                la, ca = d_aug["lesion_mask"][sla, ya, xa] > 0, d_aug["lesion_mask"][sla, ya, xa] == 0
+            else:
+                fra = patch_fraction(d_aug["lesion_mask"], sla, ya, xa, args.patch)
+                la, ca = fra >= float(args.label_rule[4:]), fra == 0
+            C["l"] = np.concatenate([C["l"], hdc_codes(enc, prep(Fa[la]))])
+            B["l"] = np.concatenate([B["l"], ba[la]])
+            if args.aug_normal > 0:
+                cn = np.where(ca)[0]
+                cn = np.random.default_rng(args.seed + 3).choice(cn, min(len(cn), int(args.aug_normal * la.sum())),
+                                                                   replace=False)
+                C["n"] = np.concatenate([C["n"], hdc_codes(enc, prep(Fa[cn]))])
+                B["n"] = np.concatenate([B["n"], ba[cn]])
+            print(f"augmented patches added: lesion {int(la.sum())}, normal {len(cn) if args.aug_normal > 0 else 0}")
         group = lambda b: bin_group(b, args.bin_mode)  # same zone / same grid cell
+        nrng = np.random.default_rng(args.seed + 777)
         sc = {s: np.zeros(len(C[s])) for s in ("val", "test")}
         n_fallback = 0
         for b in range(NB):
@@ -609,11 +715,18 @@ def main():
                 clf = HDCPrototypeClassifier(n_sub=tuple(int(v) for v in args.sup_nsub.split(",")),
                                              epochs=args.sup_epochs, seed=args.seed + b, lr=args.sup_lr,
                                              balance=bool(args.sup_balance), score_mode=args.score_mode,
-                                             hard_frac=args.hard_frac, hard_nsub=args.hard_nsub).fit(
+                                             hard_frac=args.hard_frac, hard_nsub=args.hard_nsub,
+                                             update=args.sup_update).fit(
                     np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)], wl)
+                if args.noise_proto > 0:  # stored prototypes with random bit errors (bipolar sign flips)
+                    clf.protos = [p * np.where(nrng.random(p.shape) < args.noise_proto, -1.0, 1.0).astype(np.float32)
+                                  for p in clf.protos]
                 for s, q in qs.items():
                     if q.any():
-                        sc[s][q] = clf.score(bipolar(unpack_codes(C[s][q], enc.bit_dim)))
+                        Q = bipolar(unpack_codes(C[s][q], enc.bit_dim))
+                        if args.noise_query > 0:
+                            Q = Q * np.where(nrng.random(Q.shape) < args.noise_query, -1.0, 1.0).astype(np.float32)
+                        sc[s][q] = clf.score(Q)
             else:
                 jn = np.where(mn)[0]
                 if len(jn) > 20000:
@@ -758,8 +871,12 @@ def main():
         if args.save_maps and variant == variants[0]:
             import pickle
             dump = {}
+            if args.flip and "zone_mask" in d:  # back to the original orientation (once)
+                d["zone_mask"] = np.ascontiguousarray(d["zone_mask"][..., ::-1])
             for s in ("val", "test"):
                 v = patient_volumes(d, idx[s], maps[s])
+                if args.flip:  # back to the original orientation
+                    v = {k: {**c, "map": c["map"][..., ::-1], "lesion": c["lesion"][..., ::-1]} for k, c in v.items()}
                 dump[s] = {int(k): {"map": c["map"].astype(np.float16), "lesion": (c["lesion"] > 0).astype(np.uint8),
                                     "cspca": c["cspca"],
                                     "zone": (d["zone_mask"][c["slices"]] if "zone_mask" in d else

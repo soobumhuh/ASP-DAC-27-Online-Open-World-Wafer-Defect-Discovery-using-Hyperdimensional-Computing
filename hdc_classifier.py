@@ -45,10 +45,11 @@ def majority(counts: np.ndarray) -> np.ndarray:
 class HDCPrototypeClassifier:
     def __init__(self, n_sub=(10, 5), epochs: int = 5, kmeans_iter: int = 5, batch: int = 2048, seed: int = 0,
                  lr: float = 1.0, balance: bool = True, score_mode: str = "max",
-                 hard_frac: float = 0.0, hard_nsub: int = 0):
+                 hard_frac: float = 0.0, hard_nsub: int = 0, update: str = "perceptron"):
         self.n_sub, self.epochs, self.kmeans_iter, self.batch = n_sub, epochs, kmeans_iter, batch
         self.lr, self.balance, self.score_mode = lr, balance, score_mode
         self.hard_frac, self.hard_nsub = hard_frac, hard_nsub
+        self.update = update  # 'perceptron' or 'online' (OnlineHD-style: step ~ how wrong / how close to the margin)
         self.w = None
         self.rng = np.random.default_rng(seed)
 
@@ -105,18 +106,29 @@ class HDCPrototypeClassifier:
                 S = [X @ p.T for p in P]  # (nb, n_sub_c)
                 best = np.stack([s.max(1) for s in S], 1)
                 pred = best.argmax(1)
-                wrong = pred != t
+                if self.update == "online":
+                    # OnlineHD-style: also update correct but close calls; the step grows with the (normalised) margin
+                    # error, so confident correct samples change nothing and confident mistakes change most
+                    D = X.shape[1]
+                    marg = (best[np.arange(len(t)), t] - best[np.arange(len(t)), 1 - t]) / D
+                    step = np.clip(0.05 - marg, 0, 1)[:, None] * (self.lr / 0.05)
+                    wrong = step[:, 0] > 0
+                    other = 1 - t
+                else:
+                    wrong = pred != t
+                    step = np.full((len(t), 1), self.lr)
+                    other = pred
                 if not wrong.any():
                     continue
                 for c in (0, 1):
                     # add to the true class's nearest sub-prototype
                     m = wrong & (t == c)
                     if m.any():
-                        np.add.at(self.counts[c], S[c][m].argmax(1), self.lr * X[m])
-                    # subtract from the wrongly predicted class's nearest sub-prototype
-                    m = wrong & (pred == c)
+                        np.add.at(self.counts[c], S[c][m].argmax(1), step[m] * X[m])
+                    # subtract from the competing class's nearest sub-prototype
+                    m = wrong & (other == c)
                     if m.any():
-                        np.add.at(self.counts[c], S[c][m].argmax(1), -self.lr * X[m])
+                        np.add.at(self.counts[c], S[c][m].argmax(1), -step[m] * X[m])
 
     def _agg(self, S: np.ndarray) -> np.ndarray:
         """Similarity to a class from its sub-prototype similarities (S in [-1, 1])."""

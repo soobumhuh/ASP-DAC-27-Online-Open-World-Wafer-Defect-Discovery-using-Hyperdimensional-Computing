@@ -36,7 +36,16 @@ TUNED = ("--variants proto512_negplus --descriptor stats+resnet_l2 --patch 20 --
          "--bin_mode zone_grid --num_bins 4 --clip_value 4.0 --sup_nsub 20,5 --sup_epochs 20 --sup_lr 2.0 "
          "--sup_balance 1 --label_rule frac0.25 --bin_cap 50000 --score_mode lse0.02 --smooth_sigma 2.0").split()
 DEFAULT_PP = dict(sxy=0.0, sz=0.0, q=97.0, tf=0.5, mode="dynamic", factor=2.5, minvox=10, nles=5, adj=True, gamma=0.0,
-                  mapping="sigmoid", conf="max", q_pz=None, q_tz=None)  # q_pz / q_tz: zone-specific calibration (idea 7)
+                  mapping="sigmoid", conf="max", q_pz=None, q_tz=None,  # q_pz / q_tz: zone-specific calibration (idea 7)
+                  scal=None, case_norm=0.0)  # round 6: scanner-group calibration key; per-case background weight
+_GROUPS = None
+
+
+def case_group(k, key):
+    global _GROUPS
+    if _GROUPS is None:
+        _GROUPS = {int(s): g for s, g in json.load(open("results/round6/case_groups.json")).items()}
+    return _GROUPS.get(int(k), {}).get(key, "NA")
 
 
 # ------------------------------------------------------------------ maps
@@ -96,6 +105,31 @@ MODELS["t110ft"] = MODELS["t110"]
 for _k in (1, 2):
     MODELS[f"t110fts{_k}"] = MODELS["t110"] + ["--seed", str(_k)]
 
+# round 6: bootstrap bags of #110 (also a different projection seed each), shifted grid, mirrored copy
+for _k in (1, 2, 3):
+    MODELS[f"t110bag{_k}"] = MODELS["t110"] + ["--bag_seed", str(_k), "--seed", str(10 + _k)]
+MODELS["t110g1"] = MODELS["t110"] + ["--grid_offset", "1"]
+MODELS["t110flip"] = MODELS["t110"] + ["--flip", "1"]
+
+# round 6 B (hardware study, fold-0 split only): hypervector size D = 4 x projections, bit errors in prototypes / queries
+for _n in (128, 256, 512, 1024, 2048):
+    MODELS[f"hwD{4 * _n}"] = [a if a != "proto512_negplus" else f"proto{_n}_negplus" for a in MODELS["t110"]]
+for _k in (1, 2):  # round 6: seed copies of the D = 8,192 model (ensemble, as t110s1/s2)
+    MODELS[f"hwD8192s{_k}"] = MODELS["hwD8192"] + ["--seed", str(_k)]
+for _r in ("0.01", "0.05", "0.1", "0.2"):
+    MODELS[f"hwP{_r}"] = MODELS["t110"] + ["--noise_proto", _r]
+    MODELS[f"hwQ{_r}"] = MODELS["t110"] + ["--noise_query", _r]
+
+# round 6 C: frozen descriptor upgrades (replace the ResNet-18 layer-2 features), OnlineHD-style rule, bigger D
+MODEL_FMAP = {"tcrad": "mri_feature_cache/c_radimagenet_l2.npy", "tcdino": "mri_feature_cache/c_dinov2_s.npy"}
+MODELS["tcrad"] = MODELS["t110"]
+MODELS["tcdino"] = MODELS["t110"]
+MODELS["t110online"] = MODELS["t110"] + ["--sup_update", "online"]
+# round 6: U-Mamba MTL-style training-time augmentation of the lesion memory (patch_anomaly.py --aug_lesion)
+MODELS["t110aug4"] = MODELS["t110"] + ["--aug_lesion", "4"]
+MODELS["t110aug4n"] = MODELS["t110"] + ["--aug_lesion", "4", "--aug_normal", "1"]
+MODELS["t110aug1n"] = MODELS["t110"] + ["--aug_lesion", "1", "--aug_normal", "1"]
+
 if os.path.exists("results/round3/config_t35.json"):
     MODELS["t35"] = _from_config("results/round3/config_t35.json")
 
@@ -117,7 +151,8 @@ def make_maps(args):
         json.dump(sp[name], open(sf, "w"))
         cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", MODEL_NPZ.get(model, NPZ), "--split_file", sf, "--save_root", out,
                "--save_maps", pk, "--eval_splits", "none", "--workers", "8"] + MODELS[model] + \
-              (["--fmap_cache", f"mri_feature_cache/ft_{name}.npy"] if model.startswith("t110ft") else [])
+              (["--fmap_cache", f"mri_feature_cache/ft_{name}.npy"] if model.startswith("t110ft") else []) + \
+              (["--fmap_cache", MODEL_FMAP[model]] if model in MODEL_FMAP else [])
         env = {**os.environ, "OMP_NUM_THREADS": "24", "OPENBLAS_NUM_THREADS": "24"}
         with open(os.path.join(out, "log.txt"), "w") as fh:
             subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, check=True, env=env)
@@ -138,8 +173,13 @@ def _process(item):
     from scipy.special import expit
     m, off, temp, qgrid = item[:4]
     zoff = item[4] if len(item) > 4 else None  # (zone volume, {zone: offset}) for zone-specific calibration
+    goff = item[5] if len(item) > 5 else None  # scanner-group offset for this case (round 6)
     p = {**DEFAULT_PP, **_PP}
     m = m.astype(np.float32)
+    if p.get("case_norm"):  # subtract part of this case's own background level (median of its gland map)
+        m = m - float(p["case_norm"]) * float(np.nanmedian(m))
+    if goff is not None:  # scanner-group calibration replaces the global offset
+        off = goff
     if p["sxy"] > 0 or p["sz"] > 0:
         w = (~np.isnan(m)).astype(np.float32)
         num = gaussian_filter(np.nan_to_num(m), sigma=(p["sz"], p["sxy"], p["sxy"]))
@@ -182,7 +222,8 @@ def evaluate(maps: dict, ref_maps: dict, pp: dict, workers: int = 16) -> dict:
     """maps: {case: {map, lesion, cspca}}; ref_maps: the split whose csPCa-negative voxels set offset / temp."""
     from multiprocessing import get_context
     from picai_eval import evaluate as pe
-    ref = np.concatenate([c["map"][~np.isnan(c["map"])].astype(np.float32).ravel()
+    cn = float(pp.get("case_norm") or 0.0)
+    ref = np.concatenate([(lambda v: v - cn * float(np.median(v)))(c["map"][~np.isnan(c["map"])].astype(np.float32).ravel())
                           for c in ref_maps.values() if c["cspca"] == 0])
     off, temp = float(np.percentile(ref, pp["q"])), float(pp["tf"] * ref.std() + 1e-6)
     qgrid = np.percentile(ref, np.linspace(0, 100, 1001))
@@ -196,8 +237,18 @@ def evaluate(maps: dict, ref_maps: dict, pp: dict, workers: int = 16) -> dict:
                                 for c in ref_maps.values() if c["cspca"] == 0])
             offs[zz] = float(np.percentile(v, pp[qk]))
     keys = sorted(maps)
+    goffs = {}
+    if pp.get("scal"):  # per scanner group (vendor / b-value / center): offset from that group's val-normal voxels
+        cn = pp.get("case_norm") or 0.0
+        by = {}
+        for k, c in ref_maps.items():
+            if c["cspca"] == 0:
+                v = c["map"][~np.isnan(c["map"])].astype(np.float32)
+                by.setdefault(case_group(k, pp["scal"]), []).append(v - cn * float(np.median(v)))
+        goffs = {g: float(np.percentile(np.concatenate(v), pp["q"])) for g, v in by.items() if len(v) >= 5}
     with get_context("fork").Pool(workers, initializer=_init, initargs=(pp,)) as pool:
-        y_det = pool.map(_process, [(maps[k]["map"], off, temp, qgrid) + (((maps[k]["zone"], offs),) if offs else ())
+        y_det = pool.map(_process, [(maps[k]["map"], off, temp, qgrid, ((maps[k]["zone"], offs) if offs else None),
+                                     goffs.get(case_group(k, pp["scal"])) if pp.get("scal") else None)
                                     for k in keys])
     m = pe(y_det=y_det, y_true=[maps[k]["lesion"].astype(np.int32) for k in keys],
            subject_list=[str(k) for k in keys], num_parallel_calls=workers)
