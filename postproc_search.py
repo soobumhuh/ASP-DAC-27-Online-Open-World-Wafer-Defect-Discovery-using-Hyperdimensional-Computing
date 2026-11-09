@@ -29,7 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-ROOT = "results/lesion_ap"
+ROOT = "results/lesion_ap"          # saved maps live here
+OUT = os.environ.get("LESION_AP_OUT", ROOT)  # searches / finals (results/lesion_ap2 for the second round)
 NPZ = "/data/picai_all_masks.npz"
 TUNED = ("--variants proto512_negplus --descriptor stats+resnet_l2 --patch 20 --stride 4 --slice_levels 5 "
          "--bin_mode zone_grid --num_bins 4 --clip_value 4.0 --sup_nsub 20,5 --sup_epochs 20 --sup_lr 2.0 "
@@ -176,7 +177,7 @@ def suggest(trial):
 def search(args):
     import optuna
     inner = {n: load(n, args.model) for n in ("inner1", "inner2")}
-    study = optuna.create_study(study_name=f"postproc_{args.model}", storage=f"sqlite:///{ROOT}/optuna.db", direction="maximize",
+    study = optuna.create_study(study_name=f"postproc_{args.model}", storage=f"sqlite:///{OUT}/optuna.db", direction="maximize",
                                 load_if_exists=True, sampler=optuna.samplers.TPESampler(seed=args.seed, multivariate=True))
     if len(study.trials) == 0:
         study.enqueue_trial(DEFAULT_PP)  # the setting used so far (q97/t0.5, dynamic, defaults)
@@ -193,7 +194,7 @@ def search(args):
 
 def status(args):
     import optuna
-    st = optuna.load_study(study_name=f"postproc_{args.model}", storage=f"sqlite:///{ROOT}/optuna.db")
+    st = optuna.load_study(study_name=f"postproc_{args.model}", storage=f"sqlite:///{OUT}/optuna.db")
     done = [t for t in st.trials if t.state.name == "COMPLETE"]
     print(f"{args.model}: {len(done)} complete of {len(st.trials)}")
     if done and done[0].number == 0 or any(t.number == 0 for t in done):
@@ -222,7 +223,7 @@ def final(args):
         best = None
     else:
         import optuna
-        st = optuna.load_study(study_name=f"postproc_{args.model}", storage=f"sqlite:///{ROOT}/optuna.db")
+        st = optuna.load_study(study_name=f"postproc_{args.model}", storage=f"sqlite:///{OUT}/optuna.db")
         best = max([t for t in st.trials if t.state.name == "COMPLETE"], key=lambda t: t.value)
         tuned = {**DEFAULT_PP, **best.params}
     for label, pp in (("current", DEFAULT_PP), ("tuned", tuned)):
@@ -243,7 +244,8 @@ def final(args):
     if best is not None:
         rows["best_trial"] = {"number": best.number, "inner_val_picai": best.value, **best.user_attrs}
     tag = "_pp-" + os.path.splitext(os.path.basename(args.pp_json))[0] if args.pp_json else ""
-    json.dump(rows, open(os.path.join(ROOT, f"final_{args.model}{tag}.json"), "w"), indent=2)
+    os.makedirs(OUT, exist_ok=True)
+    json.dump(rows, open(os.path.join(OUT, f"final_{args.model}{tag}.json"), "w"), indent=2)
     for label in ("current", "tuned"):
         m, s = rows[label]["mean"], rows[label]["std"]
         print(f"{label}: fold0 PI-CAI {rows[label]['per_fold'][0]['picai_score']:.3f} | CV PI-CAI "

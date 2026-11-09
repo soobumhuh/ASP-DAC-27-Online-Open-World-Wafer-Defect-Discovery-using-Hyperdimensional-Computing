@@ -106,6 +106,7 @@ def main():
                     help="json list of {name, train, val, test} patient-id splits used instead of --seeds "
                          "(cv_hdc.py: the 5 official PI-CAI folds)")
     ap.add_argument("--ap_json", default=None, help="json {split name: design-A test lesion AP} for the PI-CAI score")
+    ap.add_argument("--parallel", type=int, default=1, help="patch-model runs at once (prefetch all dumps)")
     ap.add_argument("--D", type=int, default=2048, help="record dimension (= patch HV dimension for img_top)")
     ap.add_argument("--levels", type=int, default=16, help="levels for clinical numeric fields and img_max")
     ap.add_argument("--img_levels", type=int, default=64, help="levels for img_max_fine and the per-zone fields")
@@ -135,6 +136,25 @@ def main():
             plan.append((seed, f"seed{seed}", {k: sorted(p for p, v in so.items() if v == k) for k in ("train", "val", "test")}))
     ap_by_name = json.load(open(args.ap_json)) if args.ap_json else None
 
+    def cf_splits(seed, groups):
+        tr = np.array(groups["train"])
+        tr_pos = np.array([any(case_y[c] for c in case_ids if case_pid[c] == p) for p in tr])
+        fold = np.zeros(len(tr), int)
+        for flag in (0, 1):
+            j = np.where(tr_pos == flag)[0]
+            fold[np.random.default_rng(seed + 7).permutation(j)] = np.arange(len(j)) % 3
+        return [{"train": tr[fold != f], "val": groups["val"], "test": tr[fold == f]} for f in range(3)]
+
+    if args.parallel > 1:  # run all patch-model jobs (base + 3 cross-fits per split) concurrently first
+        from concurrent.futures import ThreadPoolExecutor
+        jobs = []
+        for seed, sname, groups in plan:
+            jobs.append((sname, groups, "base", seed))
+            jobs += [(sname, sp, f"cf{f}", seed) for f, sp in enumerate(cf_splits(seed, groups))]
+        with ThreadPoolExecutor(args.parallel) as ex:
+            for fu in [ex.submit(run_patch, args, *j) for j in jobs]:
+                fu.result()
+
     results = {}
     for si, (seed, sname, groups) in enumerate(plan):
         split_of = {p: k for k, v in groups.items() for p in v}
@@ -153,14 +173,7 @@ def main():
                 img[int(c)] = r
         for s in ("val", "test"):
             take(base, s)
-        tr = np.array(groups["train"])
-        tr_pos = np.array([any(case_y[c] for c in case_ids if case_pid[c] == p) for p in tr])
-        fold = np.zeros(len(tr), int)
-        for flag in (0, 1):
-            j = np.where(tr_pos == flag)[0]
-            fold[np.random.default_rng(seed + 7).permutation(j)] = np.arange(len(j)) % 3
-        for f in range(3):
-            sp = {"train": tr[fold != f], "val": groups["val"], "test": tr[fold == f]}
+        for f, sp in enumerate(cf_splits(seed, groups)):
             dmp = run_patch(args, sname, sp, f"cf{f}", seed)
             take(dmp, "test")
 
