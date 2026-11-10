@@ -59,6 +59,8 @@ def _extract(item):
     cands = []
     for k, cf in conf:
         K = idx == k
+        if not K.any():  # a candidate fully overwritten by a later one (adj = False): nothing left to score
+            continue
         v = prob[K]
         if p["conf"] == "mean":
             cf = float(v.mean())
