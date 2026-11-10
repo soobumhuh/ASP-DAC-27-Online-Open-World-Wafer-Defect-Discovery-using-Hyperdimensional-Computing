@@ -60,5 +60,14 @@ CV (15 map jobs + post-processing) takes about 1.5–2 h. Retuning (folds 1–4 
 | D = 8,192 single model (round 6, hardware study) | 0.684 | 0.631 ± 0.045 |
 | U-Mamba MTL (3D CNN; PI-CAI hidden tuning set, not our CV) | 0.781 | – |
 
+Reproduction check of this code (`configs/test_fresh.yaml`, everything rebuilt from the raw PI-CAI files):
+- slice file: identical to the published one; maps of #110 fold 0 from the published feature cache: bit-identical
+- post-processing of the saved maps: fold 0 0.672, CV 0.649 ± 0.036 (exact)
+- fully fresh run (new ResNet cache, all 15 map jobs): fold 0 0.669, CV 0.648 ± 0.035. The new feature cache differs
+  in ~0.1% of values by one float16 step (CPU thread order); thermometer quantisation and retraining turn that into
+  seed-level noise in the maps.
+- run time on the lab server (2 jobs at a time): slices 6 min, ResNet cache ~3 min (CPU), map jobs 11–14 min each,
+  whole fresh run ~1.6 h.
+
 Round-by-round results and everything that did not help are in the round reports (project docs) and in
 `experiments/README.md`.
