@@ -209,3 +209,37 @@ def scanner_info(images_dir: str) -> dict:
         g = lambda k: r.GetMetaData(k) if r.HasMetaDataKey(k) else "NA"
         out[int(os.path.basename(f).split("_")[1])] = (f"{g('0008|0070')} {g('0008|1090')}", g("0018|9087"))
     return out
+
+
+def preprocess_case(seqs: dict, gland_path: str, zone_path: str = None, size: int = 96, margin: float = 0.25,
+                    min_gland_frac: float = 0.02) -> dict:
+    """Inference-time preprocessing of one new exam (same steps as build_slices, no lesion mask):
+    {'t2w', 'adc', 'hbv'} .mha paths + AI gland (and zone) mask -> {images (Z, 3, S, S) float16, gland_mask, zone_mask,
+    rel_z, slice_z}."""
+    import SimpleITK as sitk
+    from skimage.transform import resize
+    t2w = sitk.ReadImage(seqs["t2w"], sitk.sitkFloat32)
+    vols = [sitk.GetArrayFromImage(t2w)] + [on_grid(sitk.ReadImage(seqs[s], sitk.sitkFloat32), t2w, False)
+                                            for s in ("adc", "hbv")]
+    gland = on_grid(sitk.ReadImage(gland_path, sitk.sitkUInt8), t2w, True) > 0
+    zone = on_grid(sitk.ReadImage(zone_path, sitk.sitkUInt8), t2w, True) if zone_path and os.path.exists(zone_path) \
+        else np.zeros(gland.shape, np.uint8)
+    vols = [normalise(v, gland) for v in vols]
+    y0, y1, x0, x1 = square_box(gland, margin, gland.shape)
+    crop_area = (y1 - y0) * (x1 - x0)
+    out = {"images": [], "gland_mask": [], "zone_mask": [], "slice_z": []}
+    rs = lambda m: resize(m.astype(np.float32), (size, size), order=0, preserve_range=True,
+                          anti_aliasing=False).astype(np.uint8)
+    for z in range(gland.shape[0]):
+        g = gland[z, y0:y1, x0:x1]
+        if g.sum() < min_gland_frac * crop_area:
+            continue
+        out["images"].append(np.stack([resize(v[z, y0:y1, x0:x1], (size, size), order=1, preserve_range=True,
+                                              anti_aliasing=True) for v in vols]).astype(np.float16))
+        out["gland_mask"].append(rs(gland[z, y0:y1, x0:x1]))
+        out["zone_mask"].append(rs(zone[z, y0:y1, x0:x1]))
+        out["slice_z"].append(z)
+    n = len(out["slice_z"])
+    out = {k: np.asarray(v) for k, v in out.items()}
+    out["rel_z"] = np.linspace(0.0, 1.0, n) if n > 1 else np.full(n, 0.5)
+    return out

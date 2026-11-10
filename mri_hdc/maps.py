@@ -80,76 +80,106 @@ def case_volumes(d, slices, maps) -> dict:
     return out
 
 
-def train_and_map(d: dict, fmaps: np.ndarray, split: dict, m: dict, seed: int, log=print) -> dict:
-    """m: the 'model' section of the config. Returns {'val': case volumes, 'test': case volumes}."""
-    t0 = time.time()
-    P, levels = m["patch"], m["slice_levels"]
-    NB = n_bins(levels)
-    idx = split_indices(d, split)
-    pat = {}
-    for k, ix in idx.items():
-        F, sl, ys, xs = extract_patches(d, ix, P, m["stride"], fmaps)
-        pat[k] = (F, sl, ys, xs, position_bins(d, sl, ys, xs, levels))
-    log(" ".join(f"{k}: {len(v[0])} patches" for k, v in pat.items()) + f" ({time.time() - t0:.0f}s)")
+class PatchModel:
+    """The trained per-bin HDC memories of one split and seed: scaler + thermometer encoder, one
+    HDCPrototypeClassifier per position bin, and the per-bin z-score statistics (from the split's validation
+    csPCa-negative patches). fit() = training; patch_z() / maps() = inference on any slices."""
 
-    # normal memory: scaler on all train normals, then a seeded cap per bin
-    Ftr, btr = pat["train_normal"][0], pat["train_normal"][4]
-    pe = PatchEncoder(m["num_proj"], m["num_levels"], m["clip_value"], seed).fit_scaler(Ftr)
-    keep = np.zeros(len(Ftr), bool)
-    cap_rng = np.random.default_rng(seed + 1)
-    for b in np.unique(btr):
-        j = np.where(btr == b)[0]
-        if len(j) > m["bin_cap"]:
-            j = cap_rng.choice(j, m["bin_cap"], replace=False)
-        keep[j] = True
-    Xtr, btr = pe.prep(Ftr[keep]), btr[keep]
-    pe.fit_hdc(Xtr)
-    D = pe.D
+    def fit(self, d: dict, fmaps: np.ndarray, split: dict, m: dict, seed: int, log=print):
+        t0 = time.time()
+        self.m, self.seed = m, seed
+        P, levels = m["patch"], m["slice_levels"]
+        NB = self.NB = n_bins(levels)
+        idx = split_indices(d, split)
+        pat = {}
+        for k in ("train_normal", "train_pos", "val"):
+            F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps)
+            pat[k] = (F, sl, ys, xs, position_bins(d, sl, ys, xs, levels))
+        log(" ".join(f"{k}: {len(v[0])} patches" for k, v in pat.items()) + f" ({time.time() - t0:.0f}s)")
 
-    # lesion / clean labels on csPCa-positive training slices
-    Fp, slp, yp, xp, bp = pat["train_pos"]
-    frac = patch_fraction(d["lesion_mask"], slp, yp, xp, P)
-    les, clean = frac >= m["lesion_frac"], frac == 0
-    C = {"n": pe.codes(Xtr), "l": pe.codes(pe.prep(Fp[les])),
-         "val": pe.codes(pe.prep(pat["val"][0])), "test": pe.codes(pe.prep(pat["test"][0]))}
-    B = {"n": btr, "l": bp[les], "val": pat["val"][4], "test": pat["test"][4]}
-    nl = np.where(clean)[0]
-    nl = np.random.default_rng(seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
-    C["n"] = np.concatenate([C["n"], pe.codes(pe.prep(Fp[nl]))])
-    B["n"] = np.concatenate([B["n"], bp[nl]])
-    log(f"memory: {len(C['n'])} normal, {len(C['l'])} lesion patch HVs, D = {D}")
+        # normal memory: scaler on all train normals, then a seeded cap per bin
+        Ftr, btr = pat["train_normal"][0], pat["train_normal"][4]
+        pe = self.enc = PatchEncoder(m["num_proj"], m["num_levels"], m["clip_value"], seed).fit_scaler(Ftr)
+        keep = np.zeros(len(Ftr), bool)
+        cap_rng = np.random.default_rng(seed + 1)
+        for b in np.unique(btr):
+            j = np.where(btr == b)[0]
+            if len(j) > m["bin_cap"]:
+                j = cap_rng.choice(j, m["bin_cap"], replace=False)
+            keep[j] = True
+        Xtr, btr = pe.prep(Ftr[keep]), btr[keep]
+        pe.fit_hdc(Xtr)
+        D = pe.D
 
-    # one prototype memory per bin
-    sc = {s: np.zeros(len(C[s])) for s in ("val", "test")}
-    for b in range(NB):
-        qs = {s: B[s] == b for s in ("val", "test")}
-        if not any(q.any() for q in qs.values()):
-            continue
-        mn = B["n"] == b
-        if mn.sum() == 0:
-            mn = np.ones(len(B["n"]), bool)
-        ml = B["l"] == b
-        if ml.sum() < 50:
-            ml = bin_zone_group(B["l"]) == bin_zone_group(b)
+        # lesion / clean labels on csPCa-positive training slices
+        Fp, slp, yp, xp, bp = pat["train_pos"]
+        frac = patch_fraction(d["lesion_mask"], slp, yp, xp, P)
+        les, clean = frac >= m["lesion_frac"], frac == 0
+        C = {"n": pe.codes(Xtr), "l": pe.codes(pe.prep(Fp[les]))}
+        B = {"n": btr, "l": bp[les]}
+        nl = np.where(clean)[0]
+        nl = np.random.default_rng(seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
+        C["n"] = np.concatenate([C["n"], pe.codes(pe.prep(Fp[nl]))])
+        B["n"] = np.concatenate([B["n"], bp[nl]])
+        log(f"memory: {len(C['n'])} normal, {len(C['l'])} lesion patch HVs, D = {D}")
+
+        # one prototype memory per bin (classifier of bin b seeded with seed + b)
+        self.clf = {}
+        for b in range(NB):
+            mn = B["n"] == b
+            if mn.sum() == 0:
+                mn = np.ones(len(B["n"]), bool)
+            ml = B["l"] == b
             if ml.sum() < 50:
-                ml = np.ones(len(B["l"]), bool)
-        Xn, Xl = bipolar(unpack(C["n"][mn], D)), bipolar(unpack(C["l"][ml], D))
-        clf = HDCPrototypeClassifier(n_sub=tuple(m["n_sub"]), epochs=m["epochs"], seed=seed + b, lr=m["lr"],
-                                     softmax_t=m["softmax_t"]).fit(
-            np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
-        for s, q in qs.items():
-            if q.any():
-                sc[s][q] = clf.score(bipolar(unpack(C[s][q], D)))
+                ml = bin_zone_group(B["l"]) == bin_zone_group(b)
+                if ml.sum() < 50:
+                    ml = np.ones(len(B["l"]), bool)
+            Xn, Xl = bipolar(unpack(C["n"][mn], D)), bipolar(unpack(C["l"][ml], D))
+            c = HDCPrototypeClassifier(n_sub=tuple(m["n_sub"]), epochs=m["epochs"], seed=seed + b, lr=m["lr"],
+                                       softmax_t=m["softmax_t"]).fit(
+                np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
+            del c.counts, c.rng  # keep only the bipolar prototypes
+            self.clf[b] = c
 
-    # z-score per bin on val csPCa-negative patches, maps per case
-    vneg = d["case_cspca"][pat["val"][1]] == 0
-    out = {}
-    for s in ("val", "test"):
-        z = zscore_per_bin(sc["val"][vneg], B["val"][vneg], sc[s], B[s], NB)
-        mp = assemble_maps(d, idx[s], pat[s][1], pat[s][2], pat[s][3], z, P, m["smooth_sigma"])
-        out[s] = case_volumes(d, idx[s], mp)
-    log(f"maps done ({time.time() - t0:.0f}s)")
-    return out
+        # per-bin z statistics from the validation csPCa-negative patches
+        sv = self.raw_scores(pe.codes(pe.prep(pat["val"][0])), pat["val"][4])
+        vneg = d["case_cspca"][pat["val"][1]] == 0
+        ref, rb = sv[vneg], pat["val"][4][vneg]
+        self.mu, self.sd = np.full(NB, ref.mean()), np.full(NB, ref.std() + 1e-6)
+        for b in np.unique(rb):
+            self.mu[b], self.sd[b] = ref[rb == b].mean(), ref[rb == b].std() + 1e-6
+        log(f"fit done ({time.time() - t0:.0f}s)")
+        return self
+
+    def raw_scores(self, codes: np.ndarray, bins: np.ndarray) -> np.ndarray:
+        """Hamming-similarity score of each patch HV against the prototypes of its bin."""
+        sc = np.zeros(len(codes))
+        for b in np.unique(bins):
+            q = bins == b
+            sc[q] = self.clf[int(b)].score(bipolar(unpack(codes[q], self.enc.D)))
+        return sc
+
+    def patches(self, d: dict, fmaps: np.ndarray, idx: np.ndarray):
+        F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps)
+        return F, sl, ys, xs, position_bins(d, sl, ys, xs, self.m["slice_levels"])
+
+    def patch_z(self, F: np.ndarray, bins: np.ndarray) -> np.ndarray:
+        """Descriptors -> hypervectors -> per-bin z-scored patch scores."""
+        sc = self.raw_scores(self.enc.codes(self.enc.prep(F)), bins)
+        return (sc - self.mu[bins]) / self.sd[bins]
+
+    def maps(self, d: dict, fmaps: np.ndarray, idx: np.ndarray) -> dict:
+        F, sl, ys, xs, bins = self.patches(d, fmaps, idx)
+        mp = assemble_maps(d, idx, sl, ys, xs, self.patch_z(F, bins), self.m["patch"], self.m["smooth_sigma"])
+        return case_volumes(d, idx, mp)
+
+
+def train_and_map(d: dict, fmaps: np.ndarray, split: dict, m: dict, seed: int, log=print, return_model=False):
+    """m: the 'model' section of the config. Returns {'val': case volumes, 'test': case volumes} (and the model)."""
+    model = PatchModel().fit(d, fmaps, split, m, seed, log)
+    idx = split_indices(d, split)
+    out = {s: model.maps(d, fmaps, idx[s]) for s in ("val", "test")}
+    return (out, model) if return_model else out
 
 
 def ensemble(maps: list) -> dict:
