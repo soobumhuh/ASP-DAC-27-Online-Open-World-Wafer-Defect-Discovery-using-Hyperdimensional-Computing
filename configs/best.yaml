@@ -1,0 +1,59 @@
+# Current best HDC pipeline (round-4 pick + round-5 clinical merge; unchanged by round 6).
+# Fold 0 PI-CAI 0.672 (AUROC 0.852, lesion AP 0.491); 5-fold CV 0.649 ± 0.036.
+# Every value below was chosen on folds 1-4 only (inner splits or leave-one-fold-out); see scripts/tune.py.
+
+paths:
+  images_dir: /data/picai_images                 # unzipped picai_public_images_fold0..4 (Zenodo 6624726)
+  labels_dir: /data/picai_labels                 # clone of github.com/DIAGNijmegen/picai_labels
+  fold_lists: /data/picai_fold{f}_files.txt      # patients of each public fold
+  fold_slices: /data/picai_fold{f}_zones.npz     # per-fold slice files (scripts/build_data.py)
+  slices: /data/picai_all_masks.npz              # merged slice file with the 'fold' key
+  feature_cache: mri_feature_cache/resnet_l2.npy # frozen ResNet-18 layer-2 maps of every slice
+  out: results/pick                              # maps, logs, cv.json / cv.md
+
+data:
+  size: 96                # crop size (px); about 0.6-0.8 mm per pixel
+
+model:                    # per-split HDC patch memories (mri_hdc/maps.py), config #110
+  patch: 20               # patch size (px)
+  stride: 2               # patch-centre grid step (px)
+  slice_levels: 5         # position bins = 5 slice levels x zone (none / PZ / TZ) x 3 x 3 grid = 135
+  num_proj: 512           # random projections ...
+  num_levels: 4           # ... x thermometer levels = D = 2,048 bits
+  clip_value: 4.0         # thermometer range (robust z units)
+  n_sub: [20, 5]          # sub-prototypes per bin: normal, lesion
+  epochs: 20              # class-balanced retraining epochs
+  lr: 2.0                 # retraining step
+  softmax_t: 0.02         # soft-max over sub-prototype similarities
+  lesion_frac: 0.25       # a patch is 'lesion' if >= 25% of it is expert lesion
+  bin_cap: 50000          # normal patches stored per bin (seeded sample)
+  smooth_sigma: 2.0       # in-plane Gaussian on the maps (px)
+
+ensemble_seeds: [0, 1, 2] # projection seeds averaged into one map
+
+extraction:               # map -> candidates (mri_hdc/extraction.py), Optuna on the inner splits
+  sxy: 0.0
+  sz: 1.0
+  q: 99.0
+  tf: 1.0
+  mapping: sigmoid
+  mode: dynamic-fast
+  factor: 2.0
+  minvox: 25
+  nles: 5
+  adj: false
+  conf: top10pct
+  gamma: 0.0
+
+rescorer:                 # HDC candidate re-scorer (mri_hdc/rescorer.py), leave-one-fold-out on folds 1-4
+  epochs: 50
+  alpha: 0.25
+  seed: 0
+
+patient:
+  merge_weight: 0.25      # z(image) + w x z(clinical record), chosen on the fold-0 split's validation patients
+
+run:
+  parallel_jobs: 2        # map jobs at a time (each ~20-35 GB RAM on the full data)
+  threads: 24             # BLAS threads per map job
+  workers: 16             # processes for extraction / picai_eval

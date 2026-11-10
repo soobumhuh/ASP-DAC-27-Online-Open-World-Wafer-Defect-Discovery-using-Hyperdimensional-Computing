@@ -90,7 +90,7 @@ def main():
         json.dump({k: sp[k] for k in ("train", "val", "test")}, open(sf, "w"))
         if all(os.path.exists(os.path.join(out, f"patch_{v}", "results.json")) for v in args.a_variants.split(",")):
             return
-        cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", args.slices_npz, "--split_file", sf,
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "patch_anomaly.py"), "--slices_npz", args.slices_npz, "--split_file", sf,
                "--variants", args.a_variants, "--save_root", out, "--workers", "32"] + args.a_args.split()
         with open(os.path.join(out, "log.txt"), "w") as fh:
             subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, check=True)
@@ -116,7 +116,7 @@ def main():
 
     # ---- B: patient record HVs per fold
     if not args.skip_b:
-        cmd = [sys.executable, "patient_hdc.py", "--slices_npz", args.slices_npz, "--splits_json",
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "patient_hdc.py"), "--slices_npz", args.slices_npz, "--splits_json",
                os.path.join(root, "splits.json"), "--ap_json", os.path.join(root, "ap_for_b.json"),
                "--root", os.path.join(args.root, "B"),
                "--patch_args", f"{' '.join(a for a in args.a_args.split() if a not in ('--patch', '--stride', '12', '4'))} --variants {args.b_variant}"]

@@ -66,7 +66,7 @@ def main():
                 variants = args.knn_variants + ("," + args.raw_variants if i == 0 and args.raw_variants else "")
                 out = os.path.join(root, f"seed{s}", f"P{P}_s{st}")
                 os.makedirs(out, exist_ok=True)
-                cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", args.slices_npz, "--seed", str(s),
+                cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "patch_anomaly.py"), "--slices_npz", args.slices_npz, "--seed", str(s),
                        "--patch", str(P), "--stride", str(st), "--descriptor", args.descriptor,
                        "--variants", variants, "--save_root", out, "--workers", str(max(8, 96 // args.parallel))] + args.extra.split()
                 jobs.append((cmd, os.path.join(out, "log.txt")))

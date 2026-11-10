@@ -1,32 +1,64 @@
-# PI-CAI MRI add-on for Eric's WaferHDC code
+# HDC detection of clinically significant prostate cancer on PI-CAI MRI
 
-Copy these files into the root of your fork of Eric's repo (next to `run_full_hdc.py`).
-None of Eric's files are modified; these import his encoder, gate, clusterer and metrics.
+This adds MRI to Eric's WaferHDC code. Everything is hyperdimensional computing: binary hypervectors from Eric's
+`BinaryThermometerHDC` (`wafer_hdc_encoding.py`, unchanged), associative memories of prototypes, HDDB-style record
+hypervectors. Eric's wafer files are untouched.
 
-| File | Role |
-| --- | --- |
-| `picai_slices.py` | PI-CAI 3D cases -> prostate-cropped 2D slices (T2W, ADC, HBV) in one .npz |
-| `mri_features.py` | MRI feature sets that replace the 202 wafer features: `pixels`, `stats`, `resnet`, `stats+pixels` |
-| `mri_artifacts.py` | Synthetic low-quality slices (noise, blur, ghosting, bias field) for the quality task |
-| `picai_bundle.py` | MRI version of `prepare_normal_only_phased_data`: patient-level split, features, same `WaferDataBundle` |
-| `run_mri_hdc.py` | Stage 1 + Stage 2 on MRI, plus a no-HDC baseline, patient-level AUROC and a picture of top/bottom slices |
-| `make_fake_picai.py` | Tiny fake dataset in PI-CAI layout, for a smoke test before downloading |
+## Layout
 
-Extra packages on top of `requirements.txt`: `pip install SimpleITK matplotlib`
+| path | content |
+|---|---|
+| `mri_hdc/` | the best pipeline as a package: `data` (slices, folds, splits), `features` (patches, ResNet-18 layer 2), `encoding` (thermometer HVs), `memory` (prototype memories, record encoders), `maps` (train + score one split), `extraction` (calibration + candidates), `rescorer` (HDC candidate re-scorer), `patient` (clinical record + merge), `evaluate` (picai_eval), `pipeline` (end-to-end runs) |
+| `configs/best.yaml` | every setting of the current best model |
+| `configs/test_fresh.yaml` | the same, building data and caches from scratch into `/data/fresh` |
+| `scripts/` | entry points: `build_data.py`, `train_predict.py`, `run_fold0.py`, `run_cv.py`, `tune.py` |
+| `experiments/` | research scripts of rounds 1–6 (all ablations; see `experiments/README.md`) |
+| `results/` | outputs (not in git) |
 
-## Smoke test (2 minutes, no download)
+## Setup
 
-    python make_fake_picai.py --out fake
-    python picai_slices.py --images_dir fake/images --labels_dir fake/picai_labels --out fake_slices.npz
-    python run_mri_hdc.py --slices_npz fake_slices.npz --task quality --stage2_min_cluster_size 5
+    uv sync                     # Python 3.11, torch 2.11 cu128 (Blackwell GPUs), picai-eval, optuna, ...
 
-## Real data
+Data (outside git; on the lab server `/data` lives on `/mnt/hdd/sohuh`, as do `results/` and `mri_feature_cache/`):
 
-    git clone https://github.com/DIAGNijmegen/picai_labels
-    # images: https://zenodo.org/record/6624726 (download picai_public_images_fold0.zip first, unzip into ./picai_images)
-    python picai_slices.py --images_dir picai_images --labels_dir picai_labels --out picai_fold0.npz
-    python run_mri_hdc.py --slices_npz picai_fold0.npz --task quality --feature_set stats --save_dir results/quality_stats
-    python run_mri_hdc.py --slices_npz picai_fold0.npz --task lesion  --feature_set stats --save_dir results/lesion_stats
+- `/data/picai_images`: the five public PI-CAI image folds (Zenodo 6624726), unzipped
+- `/data/picai_labels`: clone of https://github.com/DIAGNijmegen/picai_labels (expert lesions, AI gland Bosma22b,
+  AI zones HeviAI23, marksheet)
+- `/data/picai_fold{0..4}_files.txt`: the patients of each public fold
 
-Each run writes `results.json` and `test_extremes.png` into `--save_dir`.
-Tested only on the fake dataset so far.
+## Reproduce the best result
+
+    uv run python scripts/build_data.py --config configs/best.yaml   # slices (5 folds + merge) + ResNet cache
+    uv run python scripts/run_cv.py     --config configs/best.yaml   # maps (3 seeds x 5 folds), extraction,
+                                                                     # re-scorer, clinical merge -> results/pick/cv.md
+    uv run python scripts/run_fold0.py  --config configs/best.yaml   # fold-0 row only (reuses the maps)
+
+Map jobs run `run.parallel_jobs` (2) at a time; each takes about 10 min and 20–35 GB RAM on 24 CPU threads. The full
+CV (15 map jobs + post-processing) takes about 1.5–2 h. Retuning (folds 1–4 only):
+
+    uv run python scripts/tune.py --config configs/best.yaml extraction --trials 200   # needs inner-split maps
+    uv run python scripts/tune.py --config configs/best.yaml rescorer
+    uv run python scripts/tune.py --config configs/best.yaml merge
+
+## Protocol
+
+- PI-CAI public training data: 1,500 cases, 1,476 patients, 425 csPCa; folds 0–4 as published.
+- Fold 0 is the held-out test fold: models trained on folds 1–4, tested once per variant.
+- Every choice is made on folds 1–4 only: inner splits (train on folds 1–4 minus v, validate on fold v = 1, 2) or
+  leave-one-fold-out over folds 1–4. Kept changes are then reported as 5-fold CV (each fold's test once).
+- Never model inputs: case ISUP, lesion Gleason / ISUP, histopathology, case csPCa label, PI-RADS.
+- Metrics (picai_eval): lesion AP (IoU ≥ 0.1), patient AUROC, PI-CAI score = (AUROC + AP) / 2.
+
+## Results (fold 0 / 5-fold CV PI-CAI score)
+
+| model | fold 0 | CV |
+|---|---|---|
+| #110 single HDC model, default extraction | 0.629 | 0.601 ± 0.023 |
+| #110, tuned extraction | 0.659 | 0.624 ± 0.038 |
+| 3-seed ensemble + tuned extraction + HDC re-scorer | 0.662 | 0.642 ± 0.036 |
+| **+ clinical HDC record merge (current best, `configs/best.yaml`)** | **0.672** | **0.649 ± 0.036** |
+| D = 8,192 single model (round 6, hardware study) | 0.684 | 0.631 ± 0.045 |
+| U-Mamba MTL (3D CNN; PI-CAI hidden tuning set, not our CV) | 0.781 | – |
+
+Round-by-round results and everything that did not help are in the round reports (project docs) and in
+`experiments/README.md`.

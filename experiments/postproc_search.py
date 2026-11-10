@@ -150,7 +150,7 @@ def make_maps(args):
             return
         sf = os.path.join(out, "split.json")
         json.dump(sp[name], open(sf, "w"))
-        cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", MODEL_NPZ.get(model, NPZ), "--split_file", sf, "--save_root", out,
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "patch_anomaly.py"), "--slices_npz", MODEL_NPZ.get(model, NPZ), "--split_file", sf, "--save_root", out,
                "--save_maps", pk, "--eval_splits", "none", "--workers", "8"] + MODELS[model] + \
               (["--fmap_cache", f"mri_feature_cache/ft_{name}.npy"] if model.startswith("t110ft") else []) + \
               (["--fmap_cache", MODEL_FMAP[model]] if model in MODEL_FMAP else [])

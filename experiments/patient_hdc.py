@@ -81,7 +81,7 @@ def run_patch(args, name, split, tag, seed: int):
     sf, dump = os.path.join(out_dir, f"split_{tag}.json"), os.path.join(out_dir, f"cases_{tag}.npz")
     if not os.path.exists(dump):
         json.dump({k: [int(p) for p in v] for k, v in split.items()}, open(sf, "w"))
-        cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", args.slices_npz, "--seed", str(seed),
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "patch_anomaly.py"), "--slices_npz", args.slices_npz, "--seed", str(seed),
                "--split_file", sf, "--dump_cases", dump, "--skip_eval", "--save_root", out_dir,
                "--patch", str(args.patch), "--stride", str(args.stride)] + args.patch_args.split()
         with open(os.path.join(out_dir, f"log_{tag}.txt"), "w") as fh:

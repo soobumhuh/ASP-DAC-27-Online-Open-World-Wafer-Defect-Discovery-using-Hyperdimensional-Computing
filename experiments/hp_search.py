@@ -88,7 +88,7 @@ def run_one(p: dict, split: dict, out: str, eval_splits: str, timeout: int, seed
     args, variant = cli(p)
     res = os.path.join(out, f"patch_{variant}", "results.json")
     if not os.path.exists(res):
-        cmd = [sys.executable, "patch_anomaly.py", "--slices_npz", NPZ, "--split_file", sf, "--seed", str(seed),
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "patch_anomaly.py"), "--slices_npz", NPZ, "--split_file", sf, "--seed", str(seed),
                "--save_root", out, "--workers", "12", "--eval_splits", eval_splits] + args
         env = {**os.environ, "OMP_NUM_THREADS": "16", "OPENBLAS_NUM_THREADS": "16", "MKL_NUM_THREADS": "16"}
         with open(os.path.join(out, "log.txt"), "w") as fh:
