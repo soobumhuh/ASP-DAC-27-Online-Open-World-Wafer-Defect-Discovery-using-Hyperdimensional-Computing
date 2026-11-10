@@ -81,9 +81,9 @@ def _extract(item):
                 f[name] = float(a.mean() - (b.mean() if len(b) else 0.0))
         cands.append({"conf": float(cf), "tp": iou >= 0.1, "feats": f, "mask": np.flatnonzero(K)})
     if p.get("gamma", 0) > 0 and cands:  # case gating (not used by the best setting)
-        top = max(c["conf"] for c in cands)
-        for c in cands:
-            c["conf"] *= top ** p["gamma"]
+        top = max(cd["conf"] for cd in cands)
+        for cd in cands:
+            cd["conf"] *= top ** p["gamma"]
     return key, cands, c["lesion"].shape
 
 
