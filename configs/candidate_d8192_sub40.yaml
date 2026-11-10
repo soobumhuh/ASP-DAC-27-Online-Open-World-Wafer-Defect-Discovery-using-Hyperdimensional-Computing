@@ -1,0 +1,55 @@
+# Round-7 candidate (not kept): D = 8,192 (2,048 projections x 4 levels), 40/10 sub-prototypes, 3 seeds.
+# Inner 0.680 (> pick 0.671); fold 0 0.680 (pick 0.672); 5-fold CV 0.647 +- 0.042 (pick 0.649 +- 0.036).
+paths:
+  images_dir: /data/picai_images
+  labels_dir: /data/picai_labels
+  fold_lists: /data/picai_fold{f}_files.txt
+  fold_slices: /data/picai_fold{f}_zones.npz
+  slices: /data/picai_all_masks.npz
+  feature_cache: mri_feature_cache/resnet_l2.npy
+  out: results/d8sweep/sub40
+data:
+  size: 96
+model:
+  patch: 20
+  stride: 2
+  slice_levels: 5
+  num_proj: 2048
+  num_levels: 4
+  clip_value: 4.0
+  n_sub:
+  - 40
+  - 10
+  epochs: 20
+  lr: 2.0
+  softmax_t: 0.02
+  lesion_frac: 0.25
+  bin_cap: 50000
+  smooth_sigma: 2.0
+ensemble_seeds:
+- 0
+- 1
+- 2
+extraction:
+  sxy: 1.0
+  sz: 1.0
+  q: 99.0
+  tf: 1.0
+  mode: dynamic
+  mapping: sigmoid
+  conf: mean
+  factor: 2.0
+  minvox: 50
+  nles: 5
+  adj: true
+  gamma: 0.0
+rescorer:
+  epochs: 5
+  alpha: 0.5
+  seed: 0
+patient:
+  merge_weight: 0.1
+run:
+  parallel_jobs: 2
+  threads: 24
+  workers: 16
