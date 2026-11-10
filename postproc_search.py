@@ -129,6 +129,7 @@ MODELS["t110online"] = MODELS["t110"] + ["--sup_update", "online"]
 MODELS["t110aug4"] = MODELS["t110"] + ["--aug_lesion", "4"]
 MODELS["t110aug4n"] = MODELS["t110"] + ["--aug_lesion", "4", "--aug_normal", "1"]
 MODELS["t110aug1n"] = MODELS["t110"] + ["--aug_lesion", "1", "--aug_normal", "1"]
+MODELS["hwD8192aug1n"] = MODELS["hwD8192"] + ["--aug_lesion", "1", "--aug_normal", "1"]
 
 if os.path.exists("results/round3/config_t35.json"):
     MODELS["t35"] = _from_config("results/round3/config_t35.json")
