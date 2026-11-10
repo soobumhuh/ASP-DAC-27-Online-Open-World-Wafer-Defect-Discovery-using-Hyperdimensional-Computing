@@ -30,6 +30,7 @@ def main():
     ap.add_argument("--variants", nargs="+", required=True, help="'name: {param: value, ...}'")
     ap.add_argument("--pp", required=True, help="fixed extraction setting (json)")
     ap.add_argument("--build_only", action="store_true")
+    ap.add_argument("--parallel", type=int, default=None, help="map jobs at a time (default: run.parallel_jobs)")
     args = ap.parse_args()
     base = load_config(args.config)
     pp = {**X.DEFAULT, **json.load(open(args.pp))}
@@ -48,7 +49,7 @@ def main():
     # one queue over all variants: interleave so that each variant finishes early
     from concurrent.futures import ThreadPoolExecutor
     jobs = [(n, s) for s in ("inner1", "inner2") for n in cfgs]
-    with ThreadPoolExecutor(base["run"]["parallel_jobs"]) as ex:
+    with ThreadPoolExecutor(args.parallel or base["run"]["parallel_jobs"]) as ex:
         futs = [ex.submit(build_maps, cfgs[n], [s], [0]) for n, s in jobs]
         for f in futs:
             f.result()

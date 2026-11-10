@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .encoding import PatchEncoder, bipolar, unpack
+from .encoding import PatchEncoder, bipolar, bipolar_int8, unpack
 from .features import bin_zone_group, extract_patches, n_bins, patch_fraction, position_bins
 from .memory import HDCPrototypeClassifier
 
@@ -134,10 +134,11 @@ class PatchModel:
                 ml = bin_zone_group(B["l"]) == bin_zone_group(b)
                 if ml.sum() < 50:
                     ml = np.ones(len(B["l"]), bool)
-            Xn, Xl = bipolar(unpack(C["n"][mn], D)), bipolar(unpack(C["l"][ml], D))
+            Xn = bipolar_int8(C["n"] if mn.all() else C["n"][mn], D)
+            Xl = bipolar_int8(C["l"] if ml.all() else C["l"][ml], D)
             c = HDCPrototypeClassifier(n_sub=tuple(m["n_sub"]), epochs=m["epochs"], seed=seed + b, lr=m["lr"],
-                                       softmax_t=m["softmax_t"]).fit(
-                np.concatenate([Xn, Xl]), np.r_[np.zeros(len(Xn), int), np.ones(len(Xl), int)])
+                                       softmax_t=m["softmax_t"]).fit(Xn, Xl)
+            del Xn, Xl
             del c.counts, c.rng  # keep only the bipolar prototypes
             self.clf[b] = c
 

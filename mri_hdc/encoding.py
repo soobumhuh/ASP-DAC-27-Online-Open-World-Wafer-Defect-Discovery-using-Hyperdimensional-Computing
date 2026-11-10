@@ -47,3 +47,11 @@ def unpack(codes_u8: np.ndarray, D: int) -> np.ndarray:
 def bipolar(bits: np.ndarray) -> np.ndarray:
     """{0, 1} -> {-1, +1} float32; a dot product of bipolar vectors = D - 2 x Hamming distance."""
     return bits.astype(np.float32) * 2.0 - 1.0
+
+
+def bipolar_int8(codes_u8: np.ndarray, D: int, block: int = 65536) -> np.ndarray:
+    """Packed codes -> (n, D) int8 +-1, unpacked block by block (no full-size temporaries)."""
+    out = np.empty((len(codes_u8), D), np.int8)
+    for i in range(0, len(codes_u8), block):
+        out[i:i + block] = unpack(codes_u8[i:i + block], D).astype(np.int8) * 2 - 1
+    return out

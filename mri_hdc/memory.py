@@ -29,29 +29,39 @@ class HDCPrototypeClassifier:
         self.lr, self.T = lr, softmax_t
         self.rng = np.random.default_rng(seed)
 
+    BLOCK = 65536  # rows per float32 block (the memories are stored as int8 +-1: 4x less RAM)
+
     def _kmeans(self, Xb: np.ndarray, k: int) -> np.ndarray:
         k = max(1, min(k, len(Xb)))
-        C = Xb[self.rng.choice(len(Xb), k, replace=False)].copy()
+        C = Xb[self.rng.choice(len(Xb), k, replace=False)].astype(np.float32)
         for _ in range(self.kmeans_iter):
-            a = (Xb @ majority(C).T).argmax(1)
+            P = majority(C).T
+            a = np.concatenate([(Xb[i:i + self.BLOCK].astype(np.float32) @ P).argmax(1)
+                                for i in range(0, len(Xb), self.BLOCK)])
             for j in range(k):
-                m = a == j
-                if m.any():
-                    C[j] = Xb[m].sum(0)
+                m = np.where(a == j)[0]
+                if len(m):
+                    C[j] = sum(Xb[m[i:i + self.BLOCK]].astype(np.float32).sum(0) for i in range(0, len(m), self.BLOCK)) \
+                        if len(m) > self.BLOCK else Xb[m].astype(np.float32).sum(0)
         return C
 
-    def fit(self, Xb: np.ndarray, y: np.ndarray):
-        """Xb: (n, D) bipolar float32; y: 0 = normal, 1 = lesion."""
-        self.counts = [self._kmeans(Xb[y == c], self.n_sub[c]) for c in (0, 1)]
-        idx = [np.where(y == c)[0] for c in (0, 1)]
-        n_bal = min(len(idx[0]), max(len(idx[1]), 1))  # class-balanced epochs
+    def fit(self, Xn: np.ndarray, Xl: np.ndarray):
+        """Xn / Xl: (n, D) bipolar (+-1, int8 or float32) normal / lesion hypervectors of the bin.
+        Integer-valued sums and dot products are exact in float32, so int8 storage gives the same result."""
+        self.counts = [self._kmeans(Xn, self.n_sub[0]), self._kmeans(Xl, self.n_sub[1])]
+        nN, nL = len(Xn), len(Xl)
+        idx = [np.arange(nN), np.arange(nN, nN + nL)]
+        n_bal = min(nN, max(nL, 1))  # class-balanced epochs
         for _ in range(self.epochs):
             pick = np.concatenate([self.rng.choice(idx[0], n_bal, replace=False),
-                                   self.rng.choice(idx[1], n_bal, replace=len(idx[1]) < n_bal)])
+                                   self.rng.choice(idx[1], n_bal, replace=nL < n_bal)])
             self.rng.shuffle(pick)
             for i0 in range(0, len(pick), self.batch):
                 b = pick[i0:i0 + self.batch]
-                X, t = Xb[b], y[b]
+                t = (b >= nN).astype(int)
+                X = np.empty((len(b), Xn.shape[1]), np.float32)
+                X[t == 0] = Xn[b[t == 0]]
+                X[t == 1] = Xl[b[t == 1] - nN]
                 S = [X @ majority(c).T for c in self.counts]
                 pred = np.stack([s.max(1) for s in S], 1).argmax(1)
                 wrong = pred != t
