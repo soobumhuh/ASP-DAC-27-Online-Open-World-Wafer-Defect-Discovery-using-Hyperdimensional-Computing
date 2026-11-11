@@ -38,10 +38,51 @@ def resnet_l2_maps(images: np.ndarray, cache: str = None, batch_size: int = 64, 
     return out
 
 
-def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.ndarray = None, stats: bool = True):
+def neighbour_slices(d: dict):
+    """Index of the previous / next kept slice of the same exam (by slice_z); the first / last slice repeats itself."""
+    n = len(d["study_id"])
+    prev, nxt = np.arange(n), np.arange(n)
+    sid, z = np.asarray(d["study_id"]), np.asarray(d["slice_z"])
+    order = np.lexsort((z, sid))
+    for a, b in zip(order[:-1], order[1:]):
+        if sid[a] == sid[b]:
+            nxt[a], prev[b] = b, a
+    return prev, nxt
+
+
+def resnet_l2_slices_maps(images: np.ndarray, prev: np.ndarray, nxt: np.ndarray, cache: str, batch_size: int = 64,
+                          device: str = "cpu") -> np.ndarray:
+    """2.5D variant of resnet_l2_maps: for each sequence (T2W, ADC, HBV) the slices z-1, z, z+1 go in as R, G, B;
+    the three layer-2 maps are concatenated -> (N, 384, 28, 28) float16."""
+    if cache and os.path.exists(cache):
+        return np.load(cache, mmap_mode="r")
+    import torch
+    import torch.nn.functional as F
+    from torchvision.models import ResNet18_Weights, resnet18
+    m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval().to(device)
+    out = np.lib.format.open_memmap(cache + ".tmp.npy", mode="w+", dtype=np.float16, shape=(len(images), 384, 28, 28))
+    with torch.no_grad():
+        for i in range(0, len(images), batch_size):
+            j = np.arange(i, min(i + batch_size, len(images)))
+            fs = []
+            for c in range(3):
+                x = np.stack([images[prev[j], c], images[j, c], images[nxt[j], c]], 1).astype(np.float32)
+                x = F.interpolate(torch.from_numpy(x).to(device), size=224, mode="bilinear", align_corners=False)
+                x = m.maxpool(m.relu(m.bn1(m.conv1(x))))
+                fs.append(F.avg_pool2d(m.layer2(m.layer1(x)), 3, 1, 1))
+            out[j] = torch.cat(fs, 1).cpu().numpy().astype(np.float16)
+    out.flush()
+    del out
+    os.replace(cache + ".tmp.npy", cache)
+    return np.load(cache, mmap_mode="r")
+
+
+def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.ndarray = None, stats: bool = True,
+                    context: tuple = None):
     """Patches of slices idx whose centre lies in the gland. Descriptor per patch = [feature vector of fmaps at the
-    patch centre] + [per-channel mean, per-channel std] (stats). Returns descriptors (n, D) float32, slice index,
-    centre y, centre x."""
+    patch centre] + [per-channel mean, per-channel std] (stats). With context = (prev, next) slice indices (2.5D),
+    the same descriptor of the slices above and below at the same position is appended (3 x the length).
+    Returns descriptors (n, D) float32, slice index, centre y, centre x."""
     S = d["images"].shape[-1]
     cs = patch_grid(S, P, stride)
     h = P // 2
@@ -56,15 +97,17 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.nda
             continue
         oy = cy[:, None] - h + np.arange(P)[None, :]
         ox = cx[:, None] - h + np.arange(P)[None, :]
-        pat = img[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
         parts = []
-        if fmaps is not None:
-            fh = fmaps.shape[-1]
-            fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
-            fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
-            parts.append(np.asarray(fmaps[i], dtype=np.float32)[:, fy, fx].T)
-        if stats:
-            parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
+        for j in ([i] if context is None else [i, context[0][i], context[1][i]]):
+            im = img if j == i else d["images"][j].astype(np.float32)
+            if fmaps is not None:
+                fh = fmaps.shape[-1]
+                fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
+                fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
+                parts.append(np.asarray(fmaps[j], dtype=np.float32)[:, fy, fx].T)
+            if stats:
+                pat = im[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
+                parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
         feats.append(np.concatenate(parts, axis=1).astype(np.float32))
         sl.append(np.full(len(cy), i)); ys.append(cy); xs.append(cx)
     cat = lambda a: np.concatenate(a).astype(np.int64) if a else np.zeros(0, np.int64)

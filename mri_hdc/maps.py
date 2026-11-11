@@ -28,6 +28,9 @@ from .memory import HDCPrototypeClassifier
 def prepare_slices(d: dict, m: dict) -> dict:
     """Model-specific view of the slice data. gland_dilate > 0: the AI gland mask is dilated in-plane by that many
     pixels, so patch centres and map values also cover tissue just outside it (lesions extending past the AI mask)."""
+    if m.get("context") == "25d":  # descriptors of the slices above and below are appended (2.5D)
+        from .features import neighbour_slices
+        d = {**d, "_context": neighbour_slices(d)}
     k = int(m.get("gland_dilate", 0) or 0)
     if k > 0:
         from scipy.ndimage import binary_dilation
@@ -106,7 +109,7 @@ class PatchModel:
         idx = split_indices(d, split)
         pat = {}
         for k in ("train_normal", "train_pos", "val"):
-            F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps)
+            F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps, context=d.get("_context"))
             pat[k] = (F, sl, ys, xs, position_bins(d, sl, ys, xs, levels))
         log(" ".join(f"{k}: {len(v[0])} patches" for k, v in pat.items()) + f" ({time.time() - t0:.0f}s)")
 
@@ -174,7 +177,7 @@ class PatchModel:
         return sc
 
     def patches(self, d: dict, fmaps: np.ndarray, idx: np.ndarray):
-        F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps)
+        F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps, context=d.get("_context"))
         return F, sl, ys, xs, position_bins(d, sl, ys, xs, self.m["slice_levels"])
 
     def patch_z(self, F: np.ndarray, bins: np.ndarray) -> np.ndarray:

@@ -11,6 +11,16 @@ from mri_hdc import data as D, features as Fe, maps as M
 from mri_hdc.pipeline import load_config, map_path, splits
 
 
+def feature_maps(cfg, d):
+    """ResNet layer-2 cache: 'rgb' = T2W/ADC/HBV as R/G/B (default); 'slices3' = per sequence, slices z-1/z/z+1."""
+    if cfg["model"].get("features", "rgb") == "slices3":
+        import torch
+        prev, nxt = Fe.neighbour_slices(d)
+        return Fe.resnet_l2_slices_maps(d["images"], prev, nxt, cfg["paths"]["feature_cache"].replace(".npy", "_slices3.npy"),
+                                        device="cuda" if torch.cuda.is_available() else "cpu")
+    return Fe.resnet_l2_maps(d["images"], cfg["paths"]["feature_cache"])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -23,7 +33,7 @@ def main():
         print("exists:", out)
         return
     d = M.prepare_slices(D.load_slices(cfg["paths"]["slices"]), cfg["model"])
-    fmaps = Fe.resnet_l2_maps(d["images"], cfg["paths"]["feature_cache"])
+    fmaps = feature_maps(cfg, d)
     maps = M.train_and_map(d, fmaps, splits(cfg)[args.split], cfg["model"], args.seed,
                            log=lambda s: print(s, flush=True))
     M.save(maps, out)
