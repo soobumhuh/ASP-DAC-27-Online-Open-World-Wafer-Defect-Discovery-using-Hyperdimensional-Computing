@@ -1,0 +1,76 @@
+# Clean pipeline (configs/best_clean.yaml) with 2.5D "slices as channels" ResNet features: for each sequence the
+# slices z-1, z, z+1 go into the frozen ResNet-18 as R, G, B (3 x 128 layer-2 features + 6 stats per patch).
+# Extraction: #110's setting (inner 3-seed 0.672 vs 0.671 for its own Optuna best). Nested CV as best_clean.
+paths:
+  images_dir: /data/picai_images
+  labels_dir: /data/picai_labels
+  fold_lists: /data/picai_fold{f}_files.txt
+  fold_slices: /data/picai_fold{f}_zones.npz
+  slices: /data/picai_all_masks.npz
+  feature_cache: mri_feature_cache/resnet_l2.npy
+  out: results/clean_slices3
+data:
+  size: 96
+model:
+  patch: 20
+  stride: 2
+  slice_levels: 5
+  num_proj: 512
+  num_levels: 4
+  clip_value: 4.0
+  n_sub:
+  - 20
+  - 5
+  epochs: 20
+  lr: 2.0
+  softmax_t: 0.02
+  lesion_frac: 0.25
+  bin_cap: 50000
+  smooth_sigma: 2.0
+  features: slices3
+ensemble_seeds:
+- 0
+- 1
+- 2
+extraction:
+  sxy: 0.0
+  sz: 1.0
+  q: 97.0
+  tf: 1.0
+  mapping: sigmoid
+  mode: dynamic
+  factor: 1.5
+  minvox: 25
+  nles: 10
+  adj: true
+  conf: top10pct
+  gamma: 0.0
+rescorer:
+  seed: 0
+  epochs_grid:
+  - 5
+  - 20
+  - 50
+  alpha_grid:
+  - 0.0
+  - 0.1
+  - 0.25
+  - 0.5
+  - 0.75
+patient:
+  fields:
+  - psad
+  - psa
+  - prostate_volume
+  - patient_age
+  merge_grid:
+  - 0.0
+  - 0.1
+  - 0.25
+  - 0.5
+  - 1.0
+  - 2.0
+run:
+  parallel_jobs: 2
+  threads: 24
+  workers: 16
