@@ -1,0 +1,56 @@
+# Review test 4: fixed physical pixel size (0.75 mm per pixel, 112 px = 84 mm field of view) instead of
+# fitting each exam's gland box into 96 px (0.44-1.19 mm per pixel). Everything else as configs/best.yaml.
+paths:
+  images_dir: /data/picai_images
+  labels_dir: /data/picai_labels
+  fold_lists: /data/picai_fold{f}_files.txt
+  fold_slices: /data/fixed075/picai_fold{f}.npz
+  slices: /data/fixed075/picai_all_masks.npz
+  feature_cache: /data/fixed075/resnet_l2.npy
+  out: results/review/fixed075
+data:
+  size: 112
+  spacing_mm: 0.75
+model:
+  patch: 20
+  stride: 2
+  slice_levels: 5
+  num_proj: 512
+  num_levels: 4
+  clip_value: 4.0
+  n_sub:
+  - 20
+  - 5
+  epochs: 20
+  lr: 2.0
+  softmax_t: 0.02
+  lesion_frac: 0.25
+  bin_cap: 50000
+  smooth_sigma: 2.0
+ensemble_seeds:
+- 0
+- 1
+- 2
+extraction:
+  sxy: 0.0
+  sz: 1.0
+  q: 99.0
+  tf: 1.0
+  mapping: sigmoid
+  mode: dynamic-fast
+  factor: 2.0
+  minvox: 25
+  nles: 5
+  adj: false
+  conf: top10pct
+  gamma: 0.0
+rescorer:
+  epochs: 50
+  alpha: 0.25
+  seed: 0
+patient:
+  merge_weight: 0.25
+run:
+  parallel_jobs: 2
+  threads: 24
+  workers: 16

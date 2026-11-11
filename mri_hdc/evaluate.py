@@ -23,7 +23,7 @@ def detection_maps(ext: dict, conf: dict = None) -> dict:
     return out
 
 
-def picai(det: dict, maps: dict, case_scores: dict = None, workers: int = 16) -> dict:
+def picai(det: dict, maps: dict, case_scores: dict = None, workers: int = 16, keep: dict = None) -> dict:
     """picai_eval on detection maps; case_scores replaces the default case score (max of the detection map) for the
     patient AUROC only (lesion AP never depends on it)."""
     from picai_eval import evaluate as pe
@@ -36,6 +36,11 @@ def picai(det: dict, maps: dict, case_scores: dict = None, workers: int = 16) ->
         y = [int(maps[k]["cspca"]) for k in keys]
         r["patient_auroc"] = float(roc_auc_score(y, [case_scores[k] for k in keys]))
         r["picai_score"] = (r["patient_auroc"] + r["lesion_ap"]) / 2
+    if keep is not None:  # per-case results for bootstrap confidence intervals
+        keep.update(lesion_results={k: m.lesion_results[str(k)] for k in keys},
+                    case_target={k: int(maps[k]["cspca"]) for k in keys},
+                    case_pred={k: float(case_scores[k]) if case_scores is not None else float(m.case_pred[str(k)])
+                               for k in keys})
     return r
 
 

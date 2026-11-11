@@ -97,20 +97,21 @@ def run_cv(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
     study_y = {int(s): int(c) for s, c in zip(d["study_id"], d["case_cspca"])}
     mp = {f: ensemble_maps(cfg, f"fold{f}") for f in range(5)}
     ext = {f: X.extract(mp[f]["test"], mp[f]["val"], pp, d, workers) for f in range(5)}
-    rows = []
+    rows, K = [], {}
     for f in folds:
         name = f"fold{f}"
         test, val = mp[f]["test"], mp[f]["val"]
         r = {"fold": f, "voxel_auroc": E.voxel_auroc(test),
-             "base": E.picai(E.detection_maps(ext[f]), test, workers=workers)}
+             "base": E.picai(E.detection_maps(ext[f]), test, workers=workers, keep=K.setdefault(("base", f), {}))}
         rs = Rescorer(seed=rc["seed"], epochs=rc["epochs"]).fit([c for g in range(5) if g != f for c in X.flat(ext[g])])
         conf = rs.confidences(ext[f], rc["alpha"])
-        r["rescore"] = E.picai(E.detection_maps(ext[f], conf), test, workers=workers)
+        det_rs = E.detection_maps(ext[f], conf)
+        r["rescore"] = E.picai(det_rs, test, workers=workers, keep=K.setdefault(("rescore", f), {}))
         # patient score: image case score (max re-scored candidate) merged with the clinical record
         groups = {k: set(int(p) for p in sp[name][k]) for k in ("train", "val", "test")}
         cases = {k: sorted(s for s in study_pid if study_pid[s] in groups[k]) for k in groups}
         y = {k: [study_y[c] for c in cases[k]] for k in cases}
-        clin = PT.clinical_scores(rows_ms, scan, cases, y, seed=f)
+        clin = PT.clinical_scores(rows_ms, scan, cases, y, seed=f, fields=cfg["patient"].get("fields"))
         ev = X.extract(val, val, pp, None, workers)
         img_val = [max([c["conf"] for c in ev[k][0]], default=0.0) for k in cases["val"]]
         img_test = [max(conf[k], default=0.0) for k in cases["test"]]
@@ -121,6 +122,8 @@ def run_cv(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
         r["clinical_epochs"] = clin["epochs"]
         r["merged"] = {"patient_auroc": auc_m, "lesion_ap": ap, "picai_score": (auc_m + ap) / 2}
         r["image_only"] = {"patient_auroc": auc_img, "lesion_ap": ap, "picai_score": (auc_img + ap) / 2}
+        for stage, sc in (("image_only", img_test), ("merged", merged)):  # per-case results for bootstrap CIs
+            K[(stage, f)] = {**K[("rescore", f)], "case_pred": dict(zip(cases["test"], map(float, sc)))}
         rows.append(r)
         print(f"fold {f}: " + " | ".join(f"{k} {v['patient_auroc']:.3f}/{v['lesion_ap']:.3f}/{v['picai_score']:.3f}"
                                          for k, v in r.items() if isinstance(v, dict)), flush=True)
@@ -128,6 +131,8 @@ def run_cv(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
     res = {"config": {k: v for k, v in cfg.items() if not k.startswith("_")}, "per_fold": rows,
            "cv": {s: E.summary([r[s] for r in rows]) for s in stages} if len(rows) == 5 else None}
     tag = "cv" if len(rows) == 5 else "fold" + "".join(str(f) for f in folds)
+    import pickle
+    pickle.dump(K, open(out_path(cfg, f"{tag}_cases.pkl"), "wb"))
     json.dump(res, open(out_path(cfg, f"{tag}.json"), "w"), indent=2)
     lines = ["| stage | fold-0 AUROC / AP / PI-CAI | CV AUROC | CV lesion AP | CV PI-CAI |", "|---|---|---|---|---|"]
     for s in stages:

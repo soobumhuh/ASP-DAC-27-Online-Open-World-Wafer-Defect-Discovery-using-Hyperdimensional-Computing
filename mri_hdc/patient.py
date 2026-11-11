@@ -24,9 +24,10 @@ _UNUSED = ["pz_max", "tz_max", "pz_cnt", "tz_cnt", "img"]  # keys drawn (unused)
 
 
 class ClinicalRecords:
-    def __init__(self, rows: dict, scan: dict, train_cases, seed: int, levels: int = 16):
+    def __init__(self, rows: dict, scan: dict, train_cases, seed: int, levels: int = 16, fields=None):
         rng = np.random.default_rng(1000 + seed)
         self.rows, self.scan = rows, scan
+        self.fields = list(fields) if fields else NUMERIC + SYMBOL
         self.keys = {f: rng.integers(0, 2, D, dtype=np.uint8) for f in NUMERIC + SYMBOL + _UNUSED}
         self.tie = rng.integers(0, 2, D, dtype=np.uint8)
         self.enc = {f: LevelEncoder(D, levels, rng).fit(np.array([self.val(c, f) for c in train_cases])) for f in NUMERIC}
@@ -42,22 +43,22 @@ class ClinicalRecords:
 
     def hv(self, cases):
         parts = []
-        for f in NUMERIC + SYMBOL:
+        for f in self.fields:
             x = self.enc[f].encode(np.array([self.val(c, f) for c in cases])) if f in NUMERIC else \
                 self.enc[f].encode([self.sym(c, f) for c in cases])
             parts.append(x ^ self.keys[f])
-        return bundle(parts, self.tie)
+        return bundle(parts, self.tie) if len(parts) > 1 else parts[0]
 
 
 def read_marksheet(path: str) -> dict:
     return {int(r["study_id"]): r for r in csv.DictReader(open(path))}
 
 
-def clinical_scores(rows, scan, cases: dict, y: dict, seed: int, epochs=(5, 20, 50)) -> dict:
+def clinical_scores(rows, scan, cases: dict, y: dict, seed: int, epochs=(5, 20, 50), fields=None) -> dict:
     """cases / y: {'train', 'val', 'test'} -> study ids / labels. Returns {'val': scores, 'test': scores, 'epochs'}."""
     best = None
     for ep in epochs:
-        R = ClinicalRecords(rows, scan, cases["train"], seed)
+        R = ClinicalRecords(rows, scan, cases["train"], seed, fields=fields)
         clf = HDCBinaryClassifier(epochs=ep, seed=seed).fit(R.hv(cases["train"]), np.asarray(y["train"]))
         v = roc_auc_score(y["val"], clf.score(R.hv(cases["val"])))
         if best is None or v > best[0]:

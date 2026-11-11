@@ -88,7 +88,8 @@ def tune_merge(cfg):
     cases = {k: sorted(s for s in pid if pid[s] in groups[k]) for k in groups}
     y = {k: [yv[c] for c in cases[k]] for k in cases}
     rows = PT.read_marksheet(os.path.join(cfg["paths"]["labels_dir"], "clinical_information", "marksheet.csv"))
-    clin = PT.clinical_scores(rows, D.scanner_info(cfg["paths"]["images_dir"]), cases, y, seed=0)
+    clin = PT.clinical_scores(rows, D.scanner_info(cfg["paths"]["images_dir"]), cases, y, seed=0,
+                              fields=cfg["patient"].get("fields"))
     ev = X.extract(val, val, cfg["extraction"], None, cfg["run"]["workers"])
     img = [max([c["conf"] for c in ev[k][0]], default=0.0) for k in cases["val"]]
     grid = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0)

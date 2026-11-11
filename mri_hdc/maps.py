@@ -25,6 +25,19 @@ from .features import bin_zone_group, extract_patches, n_bins, patch_fraction, p
 from .memory import HDCPrototypeClassifier
 
 
+def prepare_slices(d: dict, m: dict) -> dict:
+    """Model-specific view of the slice data. gland_dilate > 0: the AI gland mask is dilated in-plane by that many
+    pixels, so patch centres and map values also cover tissue just outside it (lesions extending past the AI mask)."""
+    k = int(m.get("gland_dilate", 0) or 0)
+    if k > 0:
+        from scipy.ndimage import binary_dilation
+        st = np.zeros((1, 2 * k + 1, 2 * k + 1), bool)
+        yy, xx = np.mgrid[-k:k + 1, -k:k + 1]
+        st[0] = yy ** 2 + xx ** 2 <= k * k
+        d = {**d, "gland_mask": binary_dilation(d["gland_mask"] > 0, st).astype(np.uint8)}
+    return d
+
+
 def split_indices(d: dict, split: dict) -> dict:
     lut = {int(p): k for k in ("train", "val", "test") for p in split[k]}
     s = np.array([lut.get(int(p), "none") for p in d["patient_id"]])

@@ -22,7 +22,7 @@ def main():
     if os.path.exists(out):
         print("exists:", out)
         return
-    d = D.load_slices(cfg["paths"]["slices"])
+    d = M.prepare_slices(D.load_slices(cfg["paths"]["slices"]), cfg["model"])
     fmaps = Fe.resnet_l2_maps(d["images"], cfg["paths"]["feature_cache"])
     maps = M.train_and_map(d, fmaps, splits(cfg)[args.split], cfg["model"], args.seed,
                            log=lambda s: print(s, flush=True))

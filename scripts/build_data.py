@@ -21,7 +21,7 @@ def build_fold(cfg, f):
     out = p["fold_slices"].format(f=f)
     if not os.path.exists(out):
         D.build_slices(p["images_dir"], p["labels_dir"], out, size=cfg["data"]["size"],
-                       patient_list=p["fold_lists"].format(f=f))
+                       patient_list=p["fold_lists"].format(f=f), spacing_mm=cfg["data"].get("spacing_mm"))
     return out
 
 

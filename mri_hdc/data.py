@@ -76,8 +76,12 @@ def read_patient_list(path: str) -> set:
 
 
 def build_slices(images_dir: str, labels_dir: str, out_path: str, size: int = 96, margin: float = 0.25,
-                 min_gland_frac: float = 0.02, patient_list: str = None, zones: bool = True, ai_lesions: bool = True):
-    """One .npz of slices (see module docstring) for the cases in images_dir (optionally only patient_list)."""
+                 min_gland_frac: float = 0.02, patient_list: str = None, zones: bool = True, ai_lesions: bool = True,
+                 spacing_mm: float = None):
+    """One .npz of slices (see module docstring) for the cases in images_dir (optionally only patient_list).
+    spacing_mm: fixed in-plane pixel size instead of fitting the gland box into size x size: a box of
+    size x spacing_mm millimetres centred on the gland box (padded where it leaves the image); the kept slices are
+    still chosen with the gland box."""
     import SimpleITK as sitk
     from skimage.transform import resize
     if os.path.exists(out_path):
@@ -127,10 +131,21 @@ def build_slices(images_dir: str, labels_dir: str, out_path: str, size: int = 96
         vols = [normalise(v, gland) for v in vols]
         y0, y1, x0, x1 = square_box(gland, margin, gland.shape)
         crop_area = (y1 - y0) * (x1 - x0)
+        keep_z = [z for z in range(gland.shape[0]) if gland[z, y0:y1, x0:x1].sum() >= min_gland_frac * crop_area]
+        if spacing_mm:  # fixed physical pixel size: re-centre a size x spacing_mm box and pad the volumes
+            sx, sy = t2w.GetSpacing()[:2]
+            cy, cx = (y0 + y1) / 2, (x0 + x1) / 2
+            hy, hx = S * spacing_mm / sy / 2, S * spacing_mm / sx / 2
+            y0, y1, x0, x1 = int(round(cy - hy)), int(round(cy + hy)), int(round(cx - hx)), int(round(cx + hx))
+            pad = ((0, 0), (max(0, -y0), max(0, y1 - gland.shape[1])), (max(0, -x0), max(0, x1 - gland.shape[2])))
+            vols = [np.pad(v, pad, constant_values=float(v.min())) for v in vols]
+            gland, lesion = np.pad(gland, pad), np.pad(lesion, pad)
+            zone = np.pad(zone, pad) if zone is not None else None
+            y0, y1, x0, x1 = y0 + pad[1][0], y1 + pad[1][0], x0 + pad[2][0], x1 + pad[2][0]
         n_kept = 0
         for z in range(gland.shape[0]):
             g = gland[z, y0:y1, x0:x1]
-            if g.sum() < min_gland_frac * crop_area:
+            if z not in keep_z:
                 continue
             out["images"].append(np.stack([resize(v[z, y0:y1, x0:x1], (S, S), order=1, preserve_range=True,
                                                   anti_aliasing=True) for v in vols]).astype(np.float16))
