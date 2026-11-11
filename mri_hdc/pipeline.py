@@ -43,7 +43,7 @@ def splits(cfg) -> dict:
     p = out_path(cfg, "splits.json")
     if not os.path.exists(p):
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        json.dump(D.cv_splits(cfg["paths"]["slices"]), open(p, "w"))
+        json.dump({**D.cv_splits(cfg["paths"]["slices"]), **D.nested_splits(cfg["paths"]["slices"])}, open(p, "w"))
     return json.load(open(p))
 
 
@@ -107,6 +107,8 @@ def run_cv(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
         conf = rs.confidences(ext[f], rc["alpha"])
         det_rs = E.detection_maps(ext[f], conf)
         r["rescore"] = E.picai(det_rs, test, workers=workers, keep=K.setdefault(("rescore", f), {}))
+        K[("candidates", f)] = {k: (shape, [(c["mask"], v) for c, v in zip(cands, conf[k])])
+                                for k, (cands, shape) in ext[f].items()}  # for native-space evaluation
         # patient score: image case score (max re-scored candidate) merged with the clinical record
         groups = {k: set(int(p) for p in sp[name][k]) for k in ("train", "val", "test")}
         cases = {k: sorted(s for s in study_pid if study_pid[s] in groups[k]) for k in groups}

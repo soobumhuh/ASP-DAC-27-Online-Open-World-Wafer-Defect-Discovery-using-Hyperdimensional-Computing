@@ -213,6 +213,34 @@ def cv_splits(npz_path: str) -> dict:
     return out
 
 
+def nested_splits(npz_path: str) -> dict:
+    """Nested splits for a clean CV: for outer test fold f and each other fold g, nest<f><g> trains on the three
+    folds that are neither f nor g (minus a seeded, csPCa-stratified 15% validation set, rng 200 + 10 f + g) and
+    tests on fold g. Their test candidates train fold f's re-scorer and choose its merge weight, so nothing
+    used for fold f was ever trained on fold f."""
+    d = np.load(npz_path, mmap_mode="r")
+    fold = {int(p): int(f) for p, f in zip(d["patient_id"], d["fold"])}
+    pos = {}
+    for p, c in zip(d["patient_id"], d["case_cspca"]):
+        pos[int(p)] = max(pos.get(int(p), 0), int(c))
+    pats = sorted(fold)
+    out = {}
+    for f in range(5):
+        for g in range(5):
+            if g == f:
+                continue
+            pool = np.array([q for q in pats if fold[q] not in (f, g)])
+            rng = np.random.default_rng(200 + 10 * f + g)
+            val = []
+            for flag in (0, 1):
+                grp = pool[np.array([pos[q] == flag for q in pool])]
+                val += list(rng.permutation(grp)[: int(round(0.15 * len(grp)))])
+            sv = set(int(v) for v in val)
+            out[f"nest{f}{g}"] = {"train": [int(q) for q in pool if int(q) not in sv], "val": sorted(sv),
+                                  "test": [q for q in pats if fold[q] == g]}
+    return out
+
+
 def scanner_info(images_dir: str) -> dict:
     """study_id -> (scanner manufacturer + model, HBV b-value) from the .mha headers (acquisition metadata only)."""
     import SimpleITK as sitk
