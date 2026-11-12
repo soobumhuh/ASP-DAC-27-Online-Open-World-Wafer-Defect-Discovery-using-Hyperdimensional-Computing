@@ -15,8 +15,13 @@ from wafer_hdc_encoding import BinaryThermometerHDC, apply_clip, apply_standardi
 
 
 class PatchEncoder:
-    def __init__(self, num_proj: int = 512, num_levels: int = 4, clip_value: float = 4.0, seed: int = 0):
+    """groups (optional): lists of descriptor columns encoded by separate thermometer encoders (num_proj split evenly)
+    whose codes are concatenated; Hamming distance then weighs every group equally, whatever its dimension."""
+
+    def __init__(self, num_proj: int = 512, num_levels: int = 4, clip_value: float = 4.0, seed: int = 0,
+                 groups: list = None):
         self.num_proj, self.num_levels, self.clip_value, self.seed = num_proj, num_levels, clip_value, seed
+        self.groups = groups
 
     def fit_scaler(self, F_all: np.ndarray):
         """Clip limits from all training normal patches (before the per-bin cap)."""
@@ -28,15 +33,25 @@ class PatchEncoder:
         return apply_standardize(apply_clip(F, self.lo, self.hi), self.mu, self.sd)
 
     def fit_hdc(self, X: np.ndarray):
-        """Thermometer encoder fitted on the prepared (capped) training normal descriptors."""
-        self.enc = BinaryThermometerHDC(in_dim=X.shape[1], num_proj=self.num_proj, num_bins=self.num_levels,
-                                        seed=self.seed, clip_value=self.clip_value).fit(X)
-        self.D = self.enc.bit_dim
+        """Thermometer encoder(s) fitted on the prepared (capped) training normal descriptors."""
+        if not self.groups:
+            self.enc = BinaryThermometerHDC(in_dim=X.shape[1], num_proj=self.num_proj, num_bins=self.num_levels,
+                                            seed=self.seed, clip_value=self.clip_value).fit(X)
+            self.D = self.enc.bit_dim
+            return self
+        n = self.num_proj // len(self.groups)
+        self.encs = [BinaryThermometerHDC(in_dim=len(g), num_proj=n, num_bins=self.num_levels, seed=self.seed + 1000 * k,
+                                          clip_value=self.clip_value).fit(X[:, g]) for k, g in enumerate(self.groups)]
+        self.D = sum(e.bit_dim for e in self.encs)
         return self
 
     def codes(self, X: np.ndarray) -> np.ndarray:
         """Prepared descriptors -> packed hypervectors (n, D / 8) uint8 (little bit order)."""
-        return np.ascontiguousarray(self.enc.transform(X, batch_size=4096)).view(np.uint8)
+        if not self.groups:
+            return np.ascontiguousarray(self.enc.transform(X, batch_size=4096)).view(np.uint8)
+        return np.ascontiguousarray(np.concatenate(
+            [np.ascontiguousarray(e.transform(X[:, g], batch_size=4096)).view(np.uint8)
+             for e, g in zip(self.encs, self.groups)], 1))
 
 
 def unpack(codes_u8: np.ndarray, D: int) -> np.ndarray:

@@ -74,6 +74,11 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--mask_ratio", type=float, default=0.6)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--objective", default="mae", choices=["mae", "contrast"],
+                    help="mae: masked reconstruction; contrast: dense InfoNCE between two photometric views (same "
+                         "geometry; one view also block-masked) at sampled in-gland grid positions + 0.5 x reconstruction")
+    ap.add_argument("--block", type=int, default=8, help="mask block size (px)")
+    ap.add_argument("--tau", type=float, default=0.1)
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -85,7 +90,10 @@ def main():
     train = np.where(~np.isin(d["fold"], list(excl)))[0]
     print(f"training slices {len(train)} (excluded folds {sorted(excl)}), device {dev}", flush=True)
     enc, dec = Encoder().to(dev), Decoder().to(dev)
-    opt = torch.optim.AdamW(list(enc.parameters()) + list(dec.parameters()), lr=args.lr, weight_decay=0.05)
+    proj = nn.Sequential(nn.Conv2d(128, 128, 1), nn.GELU(), nn.Conv2d(128, 128, 1)).to(dev)
+    opt = torch.optim.AdamW(list(enc.parameters()) + list(dec.parameters()) + list(proj.parameters()),
+                            lr=args.lr, weight_decay=0.05)
+    nb_blk = 96 // args.block
     steps = args.epochs * (len(train) // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=steps, pct_start=0.05)
     t0, step, log = time.time(), 0, []
@@ -100,16 +108,37 @@ def main():
                 g = torch.from_numpy(gland[j][..., ::-1].copy()).to(dev)
             else:
                 g = torch.from_numpy(np.ascontiguousarray(gland[j])).to(dev)
-            m = (torch.rand(len(j), 1, 1, 12, 12, device=dev) < args.mask_ratio).float()
-            m = F.interpolate(m, size=(1, 96, 96), mode="nearest").expand(-1, 1, 5, -1, -1)  # 8 x 8 blocks, all slices
-            rec = dec(enc(x * (1 - m)))
-            w = m * (1 + (g[:, None, None] > 0).float())
-            loss = ((rec - x) ** 2 * w).sum() / (w.sum() * 3 + 1e-6)
+            m = (torch.rand(len(j), 1, 1, nb_blk, nb_blk, device=dev) < args.mask_ratio).float()
+            m = F.interpolate(m, size=(1, 96, 96), mode="nearest").expand(-1, 1, 5, -1, -1)  # blocks, all slices
+            if args.objective == "mae":
+                rec = dec(enc(x * (1 - m)))
+                w = m * (1 + (g[:, None, None] > 0).float())
+                loss = ((rec - x) ** 2 * w).sum() / (w.sum() * 3 + 1e-6)
+            else:
+                def photo(v):  # per-exam, per-channel intensity scale / shift + noise (geometry unchanged)
+                    B = v.shape[0]
+                    a = torch.empty(B, 3, 1, 1, 1, device=dev).uniform_(0.8, 1.2)
+                    b = torch.empty(B, 3, 1, 1, 1, device=dev).uniform_(-0.2, 0.2)
+                    return v * a + b + 0.1 * torch.randn_like(v)
+                x1, x2 = photo(x) * (1 - m), photo(x)
+                f1, f2 = enc(x1), enc(x2)
+                z1, z2 = F.normalize(proj(f1), dim=1), F.normalize(proj(f2), dim=1)
+                gl = F.max_pool2d((g > 0).float()[:, None], 4)[:, 0]          # gland on the 24 x 24 grid
+                pos = torch.nonzero(gl > 0)
+                pos = pos[torch.randperm(len(pos), device=dev)[:512]]
+                a1 = z1[pos[:, 0], :, pos[:, 1], pos[:, 2]]
+                a2 = z2[pos[:, 0], :, pos[:, 1], pos[:, 2]]
+                logits = a1 @ a2.T / args.tau
+                tgt = torch.arange(len(pos), device=dev)
+                rec = dec(f1)
+                w = m * (1 + (g[:, None, None] > 0).float())
+                loss = (F.cross_entropy(logits, tgt) + F.cross_entropy(logits.T, tgt)) / 2 + \
+                    0.5 * ((rec - x) ** 2 * w).sum() / (w.sum() * 3 + 1e-6)
             opt.zero_grad()
             loss.backward()
             opt.step()
             sched.step()
-            tot += float(loss)
+            tot += float(loss.detach())
             step += 1
         n = len(perm) // args.batch
         log.append({"epoch": ep, "loss": tot / n, "minutes": (time.time() - t0) / 60})

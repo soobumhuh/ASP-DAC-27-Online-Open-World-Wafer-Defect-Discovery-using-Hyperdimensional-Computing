@@ -115,7 +115,8 @@ class PatchModel:
 
         # normal memory: scaler on all train normals, then a seeded cap per bin
         Ftr, btr = pat["train_normal"][0], pat["train_normal"][4]
-        pe = self.enc = PatchEncoder(m["num_proj"], m["num_levels"], m["clip_value"], seed).fit_scaler(Ftr)
+        pe = self.enc = PatchEncoder(m["num_proj"], m["num_levels"], m["clip_value"], seed,
+                                     groups=m.get("encoder_groups")).fit_scaler(Ftr)
         keep = np.zeros(len(Ftr), bool)
         cap_rng = np.random.default_rng(seed + 1)
         for b in np.unique(btr):
