@@ -94,6 +94,7 @@ class ZoneRescorer:
 
 def make(rc: dict, epochs: int):
     """Re-scorer from the config's 'rescorer' section: extra fields (rescorer.fields: NUM + SYM) and / or zone split."""
-    fields = (NUM + SYM) if rc.get("symmetry") else None
+    fields = (NUM + (SYM if rc.get("symmetry") else []) + list(rc.get("extra_fields", []))) \
+        if (rc.get("symmetry") or rc.get("extra_fields")) else None
     kw = dict(seed=rc.get("seed", 0), epochs=epochs, fields=fields)
     return ZoneRescorer(**kw) if rc.get("zone_split") else Rescorer(**kw)

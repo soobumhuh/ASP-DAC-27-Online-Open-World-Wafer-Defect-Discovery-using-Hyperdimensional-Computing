@@ -197,7 +197,7 @@ def cv_splits(npz_path: str) -> dict:
         pos[int(p)] = max(pos.get(int(p), 0), int(c))
     pats = sorted(fold)
     out = {}
-    for vf in (1, 2):
+    for vf in (1, 2, 3, 4):  # inner3 / inner4: leave-one-fold-out screens over all four tuning folds
         out[f"inner{vf}"] = {"train": [q for q in pats if fold[q] not in (0, vf)],
                              "val": [q for q in pats if fold[q] == vf], "test": [q for q in pats if fold[q] == vf][:5]}
     for f in range(5):

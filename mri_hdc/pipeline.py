@@ -91,6 +91,8 @@ def run_cv(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
     pp, rc, w = cfg["extraction"], cfg["rescorer"], cfg["patient"]["merge_weight"]
     workers = cfg["run"]["workers"]
     d = D.load_slices(cfg["paths"]["slices"])
+    if cfg["paths"].get("adc_raw"):  # absolute ADC crops (scripts/build_adc_raw.py) for re-scorer fields
+        d["adc_raw"] = np.load(cfg["paths"]["adc_raw"], mmap_mode="r")
     rows_ms = PT.read_marksheet(os.path.join(cfg["paths"]["labels_dir"], "clinical_information", "marksheet.csv"))
     scan = D.scanner_info(cfg["paths"]["images_dir"])
     study_pid = {int(s): int(p) for s, p in zip(d["study_id"], d["patient_id"])}

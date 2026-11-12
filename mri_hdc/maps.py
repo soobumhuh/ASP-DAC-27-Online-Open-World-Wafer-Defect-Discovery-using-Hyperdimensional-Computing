@@ -132,6 +132,8 @@ class PatchModel:
         Fp, slp, yp, xp, bp = pat["train_pos"]
         frac = patch_fraction(d["lesion_mask"], slp, yp, xp, P)
         les, clean = frac >= m["lesion_frac"], frac == 0
+        if m.get("lesion_rule") == "frac_or_centre":  # small lesions: the patch centre inside a lesion also counts
+            les = les | (d["lesion_mask"][slp, yp, xp] > 0)
         C = {"n": pe.codes(Xtr), "l": pe.codes(pe.prep(Fp[les]))}
         B = {"n": btr, "l": bp[les]}
         nl = np.where(clean)[0]

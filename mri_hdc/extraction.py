@@ -56,7 +56,7 @@ def _extract(item):
                                              remove_adjacent_lesion_candidates=bool(p["adj"]))
     gt, _ = ndimage.label(c["lesion"] > 0)
     ring_st = np.ones((1, 7, 7), bool)  # 3 px in-plane ring
-    cands = []
+    cands, dist = [], None
     for k, cf in conf:
         K = idx == k
         if not K.any():  # a candidate fully overwritten by a later one (adj = False): nothing left to score
@@ -85,6 +85,12 @@ def _extract(item):
                 mm = img[:, ch][Km]  # left-right symmetry: candidate minus its mirror region (0 if none in gland)
                 f["s" + name[1:]] = float(a.mean() - mm.mean()) if len(mm) else 0.0
             f["s_peak"] = float(v.max() - (prob[Km].max() if Km.any() else 0.0))
+            if img.shape[1] > 3:  # absolute ADC of the candidate (mean, 10th percentile) in um^2/s
+                a = img[:, 3][K]
+                f["a_mean"], f["a_p10"] = float(a.mean()), float(np.percentile(a, 10))
+            if dist is None:  # in-plane px to the gland edge (once per exam)
+                dist = ndimage.distance_transform_edt(gland, sampling=(100, 1, 1))
+            f["rim"] = float(np.median(dist[K]))
         cands.append({"conf": float(cf), "tp": iou >= 0.1, "feats": f, "mask": np.flatnonzero(K)})
     if p.get("gamma", 0) > 0 and cands:  # case gating (not used by the best setting)
         top = max(cd["conf"] for cd in cands)
@@ -102,7 +108,10 @@ def case_images(d: dict, study: int, n_slices: int):
     j = np.where(d["study_id"] == study)[0]
     j = j[np.argsort(d["slice_z"][j])]
     assert len(j) == n_slices
-    return np.asarray(d["images"][j], dtype=np.float32), np.asarray(d["gland_mask"][j]) > 0
+    img = np.asarray(d["images"][j], dtype=np.float32)
+    if "adc_raw" in d:  # absolute ADC (um^2/s) on the crop grid appended as a 4th channel (re-scorer fields only)
+        img = np.concatenate([img, np.asarray(d["adc_raw"][j], dtype=np.float32)[:, None]], 1)
+    return img, np.asarray(d["gland_mask"][j]) > 0
 
 
 def extract(maps: dict, ref_maps: dict, pp: dict, d: dict = None, workers: int = 16) -> dict:
