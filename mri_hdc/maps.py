@@ -153,7 +153,8 @@ class PatchModel:
                     ml = np.ones(len(B["l"]), bool)
             Xn = bipolar_int8(C["n"] if mn.all() else C["n"][mn], D)
             Xl = bipolar_int8(C["l"] if ml.all() else C["l"][ml], D)
-            c = HDCPrototypeClassifier(n_sub=tuple(m["n_sub"]), epochs=m["epochs"], seed=seed + b, lr=m["lr"],
+            ns = m["n_sub_tz"] if m.get("n_sub_tz") and bin_zone_group(b) == 2 else m["n_sub"]  # TZ bins: more capacity
+            c = HDCPrototypeClassifier(n_sub=tuple(ns), epochs=m["epochs"], seed=seed + b, lr=m["lr"],
                                        softmax_t=m["softmax_t"]).fit(Xn, Xl)
             del Xn, Xl
             del c.counts, c.rng  # keep only the bipolar prototypes
