@@ -27,7 +27,7 @@ from . import evaluate as E
 from . import extraction as X
 from . import patient as PT
 from .pipeline import build_maps, ensemble_maps, out_path, splits
-from .rescorer import Rescorer
+from .rescorer import make as make_rescorer
 
 
 def _cases(sp, study_pid, study_y, name):
@@ -59,14 +59,14 @@ def run_cv_clean(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
         # re-scorer epochs / alpha: leave-one-fold-out over the nested folds
         tune = {}
         for ep in grid_ep:
-            fits = {v: Rescorer(seed=rc["seed"], epochs=ep).fit([c for g in inner if g != v for c in X.flat(ext_in[g])])
+            fits = {v: make_rescorer(rc, ep).fit([c for g in inner if g != v for c in X.flat(ext_in[g])])
                     for v in inner}
             for a in grid_a:
                 r = [E.picai(E.detection_maps(ext_in[v], fits[v].confidences(ext_in[v], a)), inner[v]["test"],
                              workers=workers)["picai_score"] for v in inner]
                 tune[(ep, a)] = float(np.mean(r))
         ep, a = max(tune, key=lambda k: (tune[k], -k[1]))
-        rs = Rescorer(seed=rc["seed"], epochs=ep).fit([c for g in inner for c in X.flat(ext_in[g])])
+        rs = make_rescorer(rc, ep).fit([c for g in inner for c in X.flat(ext_in[g])])
         conf = rs.confidences(ext, a)
         K[("candidates", f)] = {k: (shape, [(c["mask"], v) for c, v in zip(cands, conf[k])])
                                 for k, (cands, shape) in ext.items()}  # for native-space evaluation

@@ -78,9 +78,13 @@ def _extract(item):
              "compact": float(K.sum() / ((np.ptp(zz) + 1) * (np.ptp(yy) + 1) * (np.ptp(xx) + 1)))}
         if img is not None:
             R = ndimage.binary_dilation(K, ring_st) & ~K & gland
+            Km = K[..., ::-1] & gland  # mirror region across the crop's vertical midline (= the gland box centre)
             for ch, name in enumerate(("c_t2w", "c_adc", "c_hbv")):
                 a, b = img[:, ch][K], img[:, ch][R]
                 f[name] = float(a.mean() - (b.mean() if len(b) else 0.0))
+                mm = img[:, ch][Km]  # left-right symmetry: candidate minus its mirror region (0 if none in gland)
+                f["s" + name[1:]] = float(a.mean() - mm.mean()) if len(mm) else 0.0
+            f["s_peak"] = float(v.max() - (prob[Km].max() if Km.any() else 0.0))
         cands.append({"conf": float(cf), "tp": iou >= 0.1, "feats": f, "mask": np.flatnonzero(K)})
     if p.get("gamma", 0) > 0 and cands:  # case gating (not used by the best setting)
         top = max(cd["conf"] for cd in cands)
