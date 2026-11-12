@@ -16,6 +16,8 @@ from mri_hdc.pipeline import load_config, map_path, splits
 def feature_maps(cfg, d):
     """ResNet layer-2 cache: 'rgb' = T2W/ADC/HBV as R/G/B (default); 'slices3' = per sequence, slices z-1/z/z+1."""
     feats = cfg["model"].get("features", "rgb")
+    if feats == "none":  # ablations H1 / H2: no CNN front end
+        return None
     if feats in ("ssl3d", "ssl3d+rgb"):  # frozen self-supervised 3D encoder (scripts/ssl3d.py), optionally + ResNet
         ssl = np.load(cfg["model"]["feature_path"], mmap_mode="r")
         return ssl if feats == "ssl3d" else [Fe.resnet_l2_maps(d["images"], cfg["paths"]["feature_cache"]), ssl]

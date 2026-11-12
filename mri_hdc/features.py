@@ -77,8 +77,21 @@ def resnet_l2_slices_maps(images: np.ndarray, prev: np.ndarray, nxt: np.ndarray,
     return np.load(cache, mmap_mode="r")
 
 
+def texture_maps(img: np.ndarray) -> np.ndarray:
+    """Handcrafted texture per channel: gradient magnitude, |Laplacian| and a 10-bin uniform LBP (P = 8, R = 1)
+    one-hot -> (3 x 12, S, S); averaged over each patch window in extract_patches (ablation H2)."""
+    from scipy import ndimage
+    from skimage.feature import local_binary_pattern
+    out = []
+    for ch in img:
+        gy, gx = np.gradient(ch)
+        lbp = local_binary_pattern(ch, 8, 1, method="uniform").astype(int)  # values 0 .. 9
+        out += [np.hypot(gy, gx), np.abs(ndimage.laplace(ch))] + [(lbp == v).astype(np.float32) for v in range(10)]
+    return np.stack(out).astype(np.float32)
+
+
 def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.ndarray = None, stats: bool = True,
-                    context: tuple = None):
+                    context: tuple = None, pix: int = 0, tex: bool = False):
     """Patches of slices idx whose centre lies in the gland. Descriptor per patch = [feature vector of fmaps at the
     patch centre] + [per-channel mean, per-channel std] (stats). With context = (prev, next) slice indices (2.5D),
     the same descriptor of the slices above and below at the same position is appended (3 x the length).
@@ -105,8 +118,15 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.nda
                 fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
                 fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
                 parts.append(np.asarray(fm[j], dtype=np.float32)[:, fy, fx].T)
+            pat = im[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
+            if pix:  # ablation H1: raw patch intensities, mean-pooled to pix x pix
+                k = P // pix
+                parts.append(pat[:, :, :pix * k, :pix * k].reshape(len(cy), -1, pix, k, pix, k).mean((3, 5))
+                             .reshape(len(cy), -1))
+            if tex:  # ablation H2: window means of handcrafted texture maps
+                tm = texture_maps(im)
+                parts.append(tm[:, oy[:, :, None], ox[:, None, :]].mean(axis=(2, 3)).T)
             if stats:
-                pat = im[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
                 parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
         feats.append(np.concatenate(parts, axis=1).astype(np.float32))
         sl.append(np.full(len(cy), i)); ys.append(cy); xs.append(cx)

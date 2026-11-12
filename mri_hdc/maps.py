@@ -109,8 +109,12 @@ class PatchModel:
         idx = split_indices(d, split)
         pat = {}
         for k in ("train_normal", "train_pos", "val"):
-            F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps, context=d.get("_context"))
+            F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps, context=d.get("_context"),
+                                            pix=m.get("pixels", 0), tex=m.get("texture", False),
+                                            stats=m.get("stats", True))
             pat[k] = (F, sl, ys, xs, position_bins(d, sl, ys, xs, levels))
+        # ablations: 'none' = one global memory; 'bound' = one global memory, position HV XOR-bound into each patch HV
+        self.mode = m.get("bins", "position")
         log(" ".join(f"{k}: {len(v[0])} patches" for k, v in pat.items()) + f" ({time.time() - t0:.0f}s)")
 
         # normal memory: scaler on all train normals, then a seeded cap per bin
@@ -127,6 +131,11 @@ class PatchModel:
         Xtr, btr = pe.prep(Ftr[keep]), btr[keep]
         pe.fit_hdc(Xtr)
         D = pe.D
+        if self.mode == "bound":  # HDDB-style: position HV = level HV xor zone HV xor grid-cell HV
+            prng = np.random.default_rng(seed + 999)
+            Lh, Zh, Gh = (prng.integers(0, 2, (n, D), dtype=np.uint8) for n in (levels, 3, 9))
+            b = np.arange(NB)
+            self.poscodes = np.packbits(Lh[b // 27] ^ Zh[(b // 9) % 3] ^ Gh[b % 9], axis=1, bitorder="little")
 
         # lesion / clean labels on csPCa-positive training slices
         Fp, slp, yp, xp, bp = pat["train_pos"]
@@ -134,17 +143,17 @@ class PatchModel:
         les, clean = frac >= m["lesion_frac"], frac == 0
         if m.get("lesion_rule") == "frac_or_centre":  # small lesions: the patch centre inside a lesion also counts
             les = les | (d["lesion_mask"][slp, yp, xp] > 0)
-        C = {"n": pe.codes(Xtr), "l": pe.codes(pe.prep(Fp[les]))}
-        B = {"n": btr, "l": bp[les]}
+        C = {"n": self._codes(Xtr, btr), "l": self._codes(pe.prep(Fp[les]), bp[les])}
+        B = {"n": self._sel(btr), "l": self._sel(bp[les])}
         nl = np.where(clean)[0]
         nl = np.random.default_rng(seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
-        C["n"] = np.concatenate([C["n"], pe.codes(pe.prep(Fp[nl]))])
-        B["n"] = np.concatenate([B["n"], bp[nl]])
+        C["n"] = np.concatenate([C["n"], self._codes(pe.prep(Fp[nl]), bp[nl])])
+        B["n"] = np.concatenate([B["n"], self._sel(bp[nl])])
         log(f"memory: {len(C['n'])} normal, {len(C['l'])} lesion patch HVs, D = {D}")
 
         # one prototype memory per bin (classifier of bin b seeded with seed + b)
         self.clf = {}
-        for b in range(NB):
+        for b in (range(NB) if self.mode == "position" else [0]):
             mn = B["n"] == b
             if mn.sum() == 0:
                 mn = np.ones(len(B["n"]), bool)
@@ -163,14 +172,23 @@ class PatchModel:
             self.clf[b] = c
 
         # per-bin z statistics from the validation csPCa-negative patches
-        sv = self.raw_scores(pe.codes(pe.prep(pat["val"][0])), pat["val"][4])
+        vb = self._sel(pat["val"][4])
+        sv = self.raw_scores(self._codes(pe.prep(pat["val"][0]), pat["val"][4]), vb)
         vneg = d["case_cspca"][pat["val"][1]] == 0
-        ref, rb = sv[vneg], pat["val"][4][vneg]
+        ref, rb = sv[vneg], vb[vneg]
         self.mu, self.sd = np.full(NB, ref.mean()), np.full(NB, ref.std() + 1e-6)
         for b in np.unique(rb):
             self.mu[b], self.sd[b] = ref[rb == b].mean(), ref[rb == b].std() + 1e-6
         log(f"fit done ({time.time() - t0:.0f}s)")
         return self
+
+    def _sel(self, bins):
+        """Memory index of each patch: its position bin, or 0 for a single global memory (ablations)."""
+        return bins if getattr(self, "mode", "position") == "position" else np.zeros_like(bins)
+
+    def _codes(self, X, bins):
+        c = self.enc.codes(X)
+        return c ^ self.poscodes[bins] if getattr(self, "mode", "position") == "bound" else c
 
     def raw_scores(self, codes: np.ndarray, bins: np.ndarray) -> np.ndarray:
         """Hamming-similarity score of each patch HV against the prototypes of its bin."""
@@ -181,13 +199,16 @@ class PatchModel:
         return sc
 
     def patches(self, d: dict, fmaps: np.ndarray, idx: np.ndarray):
-        F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps, context=d.get("_context"))
+        F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps, context=d.get("_context"),
+                                        pix=self.m.get("pixels", 0), tex=self.m.get("texture", False),
+                                        stats=self.m.get("stats", True))
         return F, sl, ys, xs, position_bins(d, sl, ys, xs, self.m["slice_levels"])
 
     def patch_z(self, F: np.ndarray, bins: np.ndarray) -> np.ndarray:
         """Descriptors -> hypervectors -> per-bin z-scored patch scores."""
-        sc = self.raw_scores(self.enc.codes(self.enc.prep(F)), bins)
-        return (sc - self.mu[bins]) / self.sd[bins]
+        mb = self._sel(bins)
+        sc = self.raw_scores(self._codes(self.enc.prep(F), bins), mb)
+        return (sc - self.mu[mb]) / self.sd[mb]
 
     def maps(self, d: dict, fmaps: np.ndarray, idx: np.ndarray) -> dict:
         F, sl, ys, xs, bins = self.patches(d, fmaps, idx)
