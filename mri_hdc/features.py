@@ -100,11 +100,11 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.nda
         parts = []
         for j in ([i] if context is None else [i, context[0][i], context[1][i]]):
             im = img if j == i else d["images"][j].astype(np.float32)
-            if fmaps is not None:
-                fh = fmaps.shape[-1]
+            for fm in ([] if fmaps is None else fmaps if isinstance(fmaps, (list, tuple)) else [fmaps]):
+                fh = fm.shape[-1]  # several feature maps may have different grids (e.g. 28 x 28 and 24 x 24)
                 fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
                 fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
-                parts.append(np.asarray(fmaps[j], dtype=np.float32)[:, fy, fx].T)
+                parts.append(np.asarray(fm[j], dtype=np.float32)[:, fy, fx].T)
             if stats:
                 pat = im[:, oy[:, :, None], ox[:, None, :]].transpose(1, 0, 2, 3)  # (n, C, P, P)
                 parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
