@@ -1,0 +1,32 @@
+{
+ "auroc": 0.8695461597331705,
+ "n_pos": 70698,
+ "n_neg": 2298917,
+ "auroc_lt150": 0.7824922850436515,
+ "n_pos_lt150": 79,
+ "auroc_150to500": 0.7604927985605856,
+ "n_pos_150to500": 435,
+ "auroc_gt500": 0.8703200607392481,
+ "n_pos_gt500": 70184,
+ "auroc_lt500": 0.7638740425920295,
+ "n_pos_lt500": 514,
+ "auroc_pz": 0.9112622211177855,
+ "auroc_tz": 0.8406922902510504,
+ "auroc_posexam": 0.8582515645486201,
+ "name": "A3_profound_s2",
+ "rule": "centre",
+ "probe": "hd",
+ "maps": "mri_feature_cache/fe_profound_s2.npy",
+ "raw_dim": 192,
+ "dim": 134,
+ "orig": false,
+ "fit_s": 317.4,
+ "patch_s": 293.7,
+ "cache_gb": 1.75,
+ "gpu_s_per_exam": 0.03550129155317942,
+ "map_shape": [
+  192,
+  16
+ ],
+ "source": "profound_s2"
+}

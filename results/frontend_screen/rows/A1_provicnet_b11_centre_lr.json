@@ -1,0 +1,32 @@
+{
+ "auroc": 0.9768914499720411,
+ "n_pos": 70698,
+ "n_neg": 2298917,
+ "auroc_lt150": 0.9035739960395109,
+ "n_pos_lt150": 79,
+ "auroc_150to500": 0.975310700397312,
+ "n_pos_150to500": 435,
+ "auroc_gt500": 0.9769837745036392,
+ "n_pos_gt500": 70184,
+ "auroc_lt500": 0.9642850201555488,
+ "n_pos_lt500": 514,
+ "auroc_pz": 0.9795821923421338,
+ "auroc_tz": 0.9761155728624801,
+ "auroc_posexam": 0.9689703765443054,
+ "name": "A1_provicnet_b11",
+ "rule": "centre",
+ "probe": "lr",
+ "maps": "mri_feature_cache/fe_provicnet_b11.npy",
+ "raw_dim": 1152,
+ "dim": 134,
+ "orig": false,
+ "fit_s": 24.0,
+ "patch_s": 406.5,
+ "cache_gb": 10.47,
+ "gpu_s_per_exam": 0.1270152129729589,
+ "map_shape": [
+  1152,
+  16
+ ],
+ "source": "provicnet_b11"
+}
