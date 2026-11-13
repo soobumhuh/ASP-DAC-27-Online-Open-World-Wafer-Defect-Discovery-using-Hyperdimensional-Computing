@@ -1,0 +1,71 @@
+# Best model (13 Nov 2026): the clean pipeline (configs/best_clean.yaml) + re-scorer fields for absolute ADC (candidate mean and
+# 10th percentile, um^2/s, from scripts/build_adc_raw.py) and distance to the gland edge; re-scorer and merge fixed
+# (50 epochs, alpha 0.25, w 0.25). Nested 5-fold CV: fold 0 0.696, CV 0.656 +- 0.043 (crop) / 0.650 +- 0.042 (native).
+# Run: uv run python scripts/build_adc_raw.py --out mri_feature_cache/adc_raw.npy
+#      uv run python scripts/run_cv_clean.py --config configs/best_clean_adc.yaml
+paths:
+  images_dir: /data/picai_images
+  labels_dir: /data/picai_labels
+  fold_lists: /data/picai_fold{f}_files.txt
+  fold_slices: /data/picai_fold{f}_zones.npz
+  slices: /data/picai_all_masks.npz
+  feature_cache: mri_feature_cache/resnet_l2.npy
+  out: results/clean_adcrim
+  adc_raw: mri_feature_cache/adc_raw.npy
+data:
+  size: 96
+model:
+  patch: 20
+  stride: 2
+  slice_levels: 5
+  num_proj: 512
+  num_levels: 4
+  clip_value: 4.0
+  n_sub:
+  - 20
+  - 5
+  epochs: 20
+  lr: 2.0
+  softmax_t: 0.02
+  lesion_frac: 0.25
+  bin_cap: 50000
+  smooth_sigma: 2.0
+ensemble_seeds:
+- 0
+- 1
+- 2
+extraction:
+  sxy: 0.0
+  sz: 1.0
+  q: 99.0
+  tf: 1.0
+  mapping: sigmoid
+  mode: dynamic-fast
+  factor: 2.0
+  minvox: 25
+  nles: 5
+  adj: false
+  conf: top10pct
+  gamma: 0.0
+rescorer:
+  seed: 0
+  epochs_grid:
+  - 50
+  alpha_grid:
+  - 0.25
+  extra_fields:
+  - a_mean
+  - a_p10
+  - rim
+patient:
+  fields:
+  - psad
+  - psa
+  - prostate_volume
+  - patient_age
+  merge_grid:
+  - 0.25
+run:
+  parallel_jobs: 2
+  threads: 24
+  workers: 16
