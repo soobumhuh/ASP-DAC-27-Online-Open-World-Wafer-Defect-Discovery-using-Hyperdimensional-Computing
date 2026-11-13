@@ -101,14 +101,16 @@ class PatchModel:
     HDCPrototypeClassifier per position bin, and the per-bin z-score statistics (from the split's validation
     csPCa-negative patches). fit() = training; patch_z() / maps() = inference on any slices."""
 
-    def fit(self, d: dict, fmaps: np.ndarray, split: dict, m: dict, seed: int, log=print):
+    def fit(self, d: dict, fmaps: np.ndarray, split: dict, m: dict, seed: int, log=print, pat: dict = None):
+        """pat (optional): precomputed {'train_normal' | 'train_pos' | 'val': (F, sl, ys, xs, bins)} patch descriptors
+        (front-end screen, mri_hdc.frontend); fmaps is then unused."""
         t0 = time.time()
         self.m, self.seed = m, seed
         P, levels = m["patch"], m["slice_levels"]
         NB = self.NB = n_bins(levels)
         idx = split_indices(d, split)
-        pat = {}
-        for k in ("train_normal", "train_pos", "val"):
+        given, pat = pat is not None, dict(pat or {})
+        for k in ([] if given else ("train_normal", "train_pos", "val")):
             F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps, context=d.get("_context"),
                                             pix=m.get("pixels", 0), tex=m.get("texture", False),
                                             stats=m.get("stats", True))
