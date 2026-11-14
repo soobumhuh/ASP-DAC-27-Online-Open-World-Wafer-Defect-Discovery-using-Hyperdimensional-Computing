@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--stage", default="merged", help="stage whose patient score is kept (merged / image_only / rescore)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--save-cases", default="", help="pickle of the native per-exam results, in the cv_cases.pkl "
+                    "layout {(stage, fold): {lesion_results, case_target, case_pred}} (for bootstrap_ci.py)")
     args = ap.parse_args()
     from picai_eval.metrics import Metrics
     cfg = load_config(args.config)
@@ -72,7 +74,7 @@ def main():
     sid2key = {int(s): f"{int(p)}_{int(s)}" for s, p in zip(d["study_id"], d["patient_id"])}
     pos = {sid2key[int(s)]: int(c) for s, c in zip(d["study_id"], d["case_cspca"])}
     CFG.update(files=D.index_mha_files(cfg["paths"]["images_dir"]), labels=cfg["paths"]["labels_dir"], pos=pos)
-    out = {"per_fold": []}
+    out, KN = {"per_fold": []}, {}
     allr = {"lesion_results": {}, "case_target": {}, "case_pred": {}, "case_pred_det": {}}
     for f in range(5):
         cands = K[("candidates", f)]
@@ -93,11 +95,14 @@ def main():
                                          "picai_score": (mdet.auroc + mdet.AP) / 2},
                "crop_grid": {"patient_auroc": crop.auroc, "lesion_ap": crop.AP, "picai_score": (crop.auroc + crop.AP) / 2}}
         out["per_fold"].append(row)
+        KN[(args.stage, f)] = {"lesion_results": lr, "case_target": tgt, "case_pred": cp}
         print(f, json.dumps({k: {a: round(b, 4) for a, b in v.items()} for k, v in row.items() if k != "fold"}), flush=True)
     for k in ("native", "native_det_case_score", "crop_grid"):
         out[k] = {m: [float(np.mean([r[k][m] for r in out["per_fold"]])), float(np.std([r[k][m] for r in out["per_fold"]]))]
                   for m in ("patient_auroc", "lesion_ap", "picai_score")}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    if args.save_cases:
+        pickle.dump(KN, open(args.save_cases, "wb"))
     json.dump(out, open(args.out, "w"), indent=2)
     print(json.dumps({k: out[k] for k in ("native", "native_det_case_score", "crop_grid")}, indent=1))
 

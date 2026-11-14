@@ -33,7 +33,7 @@ def metrics(K, folds, draws):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", nargs="+", required=True, help="name=out_dir:stage")
+    ap.add_argument("--runs", nargs="+", required=True, help="name=out_dir:stage or name=file.pkl:stage")
     ap.add_argument("--ref", required=True)
     ap.add_argument("--n", type=int, default=1000)
     ap.add_argument("--out", default="results/review/bootstrap.json")
@@ -42,7 +42,7 @@ def main():
     for r in args.runs:
         name, rest = r.split("=", 1)
         path, stage = rest.rsplit(":", 1)
-        K = pickle.load(open(f"{path}/cv_cases.pkl", "rb"))
+        K = pickle.load(open(path if path.endswith(".pkl") else f"{path}/cv_cases.pkl", "rb"))  # or a native_eval --save-cases file
         runs[name] = {f: K[(stage, f)] for f in range(5)}
     rng = np.random.default_rng(0)
     sizes = {f: len(runs[args.ref][f]["case_target"]) for f in range(5)}
