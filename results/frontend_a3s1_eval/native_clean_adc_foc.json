@@ -1,0 +1,136 @@
+{
+  "per_fold": [
+    {
+      "fold": 0,
+      "native": {
+        "patient_auroc": 0.8452862770492687,
+        "lesion_ap": 0.4583198373935064,
+        "picai_score": 0.6518030572213875
+      },
+      "native_det_case_score": {
+        "patient_auroc": 0.8234310075009443,
+        "lesion_ap": 0.4583198373935064,
+        "picai_score": 0.6408754224472254
+      },
+      "crop_grid": {
+        "patient_auroc": 0.8452862770492687,
+        "lesion_ap": 0.45457894476241756,
+        "picai_score": 0.6499326109058432
+      }
+    },
+    {
+      "fold": 1,
+      "native": {
+        "patient_auroc": 0.8664864547217488,
+        "lesion_ap": 0.5429379259915633,
+        "picai_score": 0.704712190356656
+      },
+      "native_det_case_score": {
+        "patient_auroc": 0.8512663806781454,
+        "lesion_ap": 0.5429379259915633,
+        "picai_score": 0.6971021533348544
+      },
+      "crop_grid": {
+        "patient_auroc": 0.8664864547217488,
+        "lesion_ap": 0.5596515420993676,
+        "picai_score": 0.7130689984105583
+      }
+    },
+    {
+      "fold": 2,
+      "native": {
+        "patient_auroc": 0.810375955819881,
+        "lesion_ap": 0.4216619485481461,
+        "picai_score": 0.6160189521840136
+      },
+      "native_det_case_score": {
+        "patient_auroc": 0.7983220050977061,
+        "lesion_ap": 0.4216619485481461,
+        "picai_score": 0.609991976822926
+      },
+      "crop_grid": {
+        "patient_auroc": 0.810375955819881,
+        "lesion_ap": 0.4202516801533614,
+        "picai_score": 0.6153138179866212
+      }
+    },
+    {
+      "fold": 3,
+      "native": {
+        "patient_auroc": 0.8378127896200186,
+        "lesion_ap": 0.4532148701983788,
+        "picai_score": 0.6455138299091987
+      },
+      "native_det_case_score": {
+        "patient_auroc": 0.8124080030529358,
+        "lesion_ap": 0.4532148701983788,
+        "picai_score": 0.6328114366256573
+      },
+      "crop_grid": {
+        "patient_auroc": 0.8378127896200186,
+        "lesion_ap": 0.4584848105495228,
+        "picai_score": 0.6481488000847707
+      }
+    },
+    {
+      "fold": 4,
+      "native": {
+        "patient_auroc": 0.7862459546925566,
+        "lesion_ap": 0.38896498869680535,
+        "picai_score": 0.587605471694681
+      },
+      "native_det_case_score": {
+        "patient_auroc": 0.7812837108953614,
+        "lesion_ap": 0.38896498869680535,
+        "picai_score": 0.5851243497960834
+      },
+      "crop_grid": {
+        "patient_auroc": 0.7862459546925566,
+        "lesion_ap": 0.3850360494170396,
+        "picai_score": 0.5856410020547982
+      }
+    }
+  ],
+  "native": {
+    "patient_auroc": [
+      0.8292414863806947,
+      0.028009334879756095
+    ],
+    "lesion_ap": [
+      0.45301991416568,
+      0.051380407801590595
+    ],
+    "picai_score": [
+      0.6411307002731873,
+      0.03916954657880423
+    ]
+  },
+  "native_det_case_score": {
+    "patient_auroc": [
+      0.8133422214450186,
+      0.023640022078705678
+    ],
+    "lesion_ap": [
+      0.45301991416568,
+      0.051380407801590595
+    ],
+    "picai_score": [
+      0.6331810678053493,
+      0.03739632864934061
+    ]
+  },
+  "crop_grid": {
+    "patient_auroc": [
+      0.8292414863806947,
+      0.028009334879756095
+    ],
+    "lesion_ap": [
+      0.4556006053963418,
+      0.058420652058982565
+    ],
+    "picai_score": [
+      0.6424210458885182,
+      0.0425185586655596
+    ]
+  }
+}

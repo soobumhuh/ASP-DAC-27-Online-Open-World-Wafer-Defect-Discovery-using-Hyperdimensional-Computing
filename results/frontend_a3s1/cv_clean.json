@@ -1,0 +1,222 @@
+{
+  "per_fold": [
+    {
+      "fold": 0,
+      "rescorer": {
+        "epochs": 50,
+        "alpha": 0.25
+      },
+      "voxel_auroc": 0.9401402313961053,
+      "base": {
+        "patient_auroc": 0.8276401705250661,
+        "lesion_ap": 0.4246049431039274,
+        "picai_score": 0.6261225568144968
+      },
+      "rescore": {
+        "patient_auroc": 0.8317414062921591,
+        "lesion_ap": 0.4293074413303,
+        "picai_score": 0.6305244238112295
+      },
+      "merge_weight": 0.25,
+      "merge_lofo_auroc": {
+        "0.25": 0.8008274225606894
+      },
+      "image_only": {
+        "patient_auroc": 0.8317414062921591,
+        "lesion_ap": 0.4293074413303,
+        "picai_score": 0.6305244238112295
+      },
+      "merged": {
+        "patient_auroc": 0.8479304948464734,
+        "lesion_ap": 0.4293074413303,
+        "picai_score": 0.6386189680883867
+      }
+    },
+    {
+      "fold": 1,
+      "rescorer": {
+        "epochs": 50,
+        "alpha": 0.25
+      },
+      "voxel_auroc": 0.9439756164235538,
+      "base": {
+        "patient_auroc": 0.8205911735323501,
+        "lesion_ap": 0.44151797363286127,
+        "picai_score": 0.6310545735826056
+      },
+      "rescore": {
+        "patient_auroc": 0.8298172415819475,
+        "lesion_ap": 0.4529440253005437,
+        "picai_score": 0.6413806334412455
+      },
+      "merge_weight": 0.25,
+      "merge_lofo_auroc": {
+        "0.25": 0.7960635772022268
+      },
+      "image_only": {
+        "patient_auroc": 0.8298172415819475,
+        "lesion_ap": 0.4529440253005437,
+        "picai_score": 0.6413806334412455
+      },
+      "merged": {
+        "patient_auroc": 0.850091085385203,
+        "lesion_ap": 0.4529440253005437,
+        "picai_score": 0.6515175553428734
+      }
+    },
+    {
+      "fold": 2,
+      "rescorer": {
+        "epochs": 50,
+        "alpha": 0.25
+      },
+      "voxel_auroc": 0.9123528553857798,
+      "base": {
+        "patient_auroc": 0.754035683942226,
+        "lesion_ap": 0.2904189281975212,
+        "picai_score": 0.5222273060698736
+      },
+      "rescore": {
+        "patient_auroc": 0.7692225998300766,
+        "lesion_ap": 0.3325670789538739,
+        "picai_score": 0.5508948393919753
+      },
+      "merge_weight": 0.25,
+      "merge_lofo_auroc": {
+        "0.25": 0.8100010459676189
+      },
+      "image_only": {
+        "patient_auroc": 0.7692225998300766,
+        "lesion_ap": 0.3325670789538739,
+        "picai_score": 0.5508948393919753
+      },
+      "merged": {
+        "patient_auroc": 0.7813827527612575,
+        "lesion_ap": 0.3325670789538739,
+        "picai_score": 0.5569749158575656
+      }
+    },
+    {
+      "fold": 3,
+      "rescorer": {
+        "epochs": 50,
+        "alpha": 0.25
+      },
+      "voxel_auroc": 0.9573305625720814,
+      "base": {
+        "patient_auroc": 0.810426279938475,
+        "lesion_ap": 0.4320181207035238,
+        "picai_score": 0.6212222003209994
+      },
+      "rescore": {
+        "patient_auroc": 0.8000439463854099,
+        "lesion_ap": 0.4633210412974761,
+        "picai_score": 0.6316824938414429
+      },
+      "merge_weight": 0.25,
+      "merge_lofo_auroc": {
+        "0.25": 0.7981276807873199
+      },
+      "image_only": {
+        "patient_auroc": 0.8053753475440223,
+        "lesion_ap": 0.4633210412974761,
+        "picai_score": 0.6343481944207492
+      },
+      "merged": {
+        "patient_auroc": 0.8336150029984191,
+        "lesion_ap": 0.4633210412974761,
+        "picai_score": 0.6484680221479475
+      }
+    },
+    {
+      "fold": 4,
+      "rescorer": {
+        "epochs": 50,
+        "alpha": 0.25
+      },
+      "voxel_auroc": 0.9536384781960094,
+      "base": {
+        "patient_auroc": 0.7655879180151024,
+        "lesion_ap": 0.3658823886740737,
+        "picai_score": 0.565735153344588
+      },
+      "rescore": {
+        "patient_auroc": 0.7725997842502696,
+        "lesion_ap": 0.37553501510218423,
+        "picai_score": 0.5740673996762269
+      },
+      "merge_weight": 0.25,
+      "merge_lofo_auroc": {
+        "0.25": 0.819829017051097
+      },
+      "image_only": {
+        "patient_auroc": 0.7725997842502696,
+        "lesion_ap": 0.37553501510218423,
+        "picai_score": 0.5740673996762269
+      },
+      "merged": {
+        "patient_auroc": 0.7788025889967638,
+        "lesion_ap": 0.37553501510218423,
+        "picai_score": 0.5771688020494741
+      }
+    }
+  ],
+  "cv": {
+    "base": {
+      "patient_auroc": [
+        0.7956562451906439,
+        0.02999750481431672
+      ],
+      "lesion_ap": [
+        0.3908884708623815,
+        0.0567648276610623
+      ],
+      "picai_score": [
+        0.5932723580265126,
+        0.04264627089497883
+      ]
+    },
+    "rescore": {
+      "patient_auroc": [
+        0.8006849956679725,
+        0.02680395787666662
+      ],
+      "lesion_ap": [
+        0.4107349203968756,
+        0.04947947443249052
+      ],
+      "picai_score": [
+        0.6057099580324239,
+        0.03624548563132131
+      ]
+    },
+    "image_only": {
+      "patient_auroc": [
+        0.8017512758996951,
+        0.02686322571154206
+      ],
+      "lesion_ap": [
+        0.4107349203968756,
+        0.04947947443249052
+      ],
+      "picai_score": [
+        0.6062430981482854,
+        0.03664104506811648
+      ]
+    },
+    "merged": {
+      "patient_auroc": [
+        0.8183643849976233,
+        0.0317682122385354
+      ],
+      "lesion_ap": [
+        0.4107349203968756,
+        0.04947947443249052
+      ],
+      "picai_score": [
+        0.6145496526972496,
+        0.03951858264897299
+      ]
+    }
+  }
+}
