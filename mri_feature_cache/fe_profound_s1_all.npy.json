@@ -1,0 +1,14 @@
+{
+ "source": "profound_s1",
+ "map_shape": [
+  96,
+  24
+ ],
+ "gpu_s_per_exam": 0.03615879233678182,
+ "prep_cpu_s_per_exam": 1.3757236223220826,
+ "n_exams": 1500,
+ "rows": "all",
+ "crop_gland_agreement_min": 0.9942925347222222,
+ "crop_gland_agreement_mean": 0.9999421961591238,
+ "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+}

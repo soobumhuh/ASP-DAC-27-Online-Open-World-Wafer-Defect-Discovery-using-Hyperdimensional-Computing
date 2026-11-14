@@ -173,10 +173,16 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--cpu-timing", type=int, default=0, help="time N exams on CPU only; writes cpu_timing.json")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--all-folds", action="store_true",
+                    help="all five folds, rows = the full slice file (for the full pipeline); writes fe_<name>_all.npy")
+    ap.add_argument("--only", default="", help="comma-separated outputs to write (default: all)")
     args = ap.parse_args()
     import torch
     log = lambda s: print(f"[{time.strftime('%H:%M:%S')}] {s}", flush=True)
-    d = FE.drop_fold0(D.load_slices(args.slices))
+    d = D.load_slices(args.slices)
+    d = d if args.all_folds else FE.drop_fold0(d)
+    keep = [k for k in OUTS if not args.only or k in args.only.split(",")]
+    sfx = "_all" if args.all_folds else ""
     del d["images"], d["lesion_mask"], d["zone_mask"]
     N = len(d["fold"])
     sid, pid = np.asarray(d["study_id"]), np.asarray(d["patient_id"])
@@ -201,9 +207,9 @@ def main():
                   open(f"{CACHE}/fe_cpu_timing.json", "w"), indent=1)
         return
 
-    paths = {k: f"{CACHE}/fe_{k}.npy" for k in OUTS}
+    paths = {k: f"{CACHE}/fe_{k}{sfx}.npy" for k in keep}
     mm = {k: np.lib.format.open_memmap(paths[k] + ".tmp.npy", mode="w+", dtype=np.float16, shape=(N, c, g, g))
-          for k, (c, g) in OUTS.items()}
+          for k, (c, g) in OUTS.items() if k in keep}
     pool = Pool(args.workers)  # fork before CUDA is initialised
     pv, pf = load_models(args.device)
     jobs = [(key, args.images, args.labels, d["slice_z"][rows]) for key, rows in keys]
@@ -217,7 +223,8 @@ def main():
             agree.append(float((g == (c["chk"] > 0)).mean()))
             out, t = run_models(c, pv, pf, args.device)
             for k, v in out.items():
-                mm[k][rows] = v
+                if k in mm:
+                    mm[k][rows] = v
             T["provicnet"] += t["provicnet"]; T["profound"] += t["profound"]; T["prep"] += c["cpu_s"]
             if n % 50 == 0 or agree[-1] < 0.97:
                 log(f"{n + 1}/{len(jobs)} {c['key']}: crop gland agreement {agree[-1]:.3f}, "
@@ -225,18 +232,18 @@ def main():
     pool.close()
     ne = len(jobs)
     if args.limit:  # smoke test: keep nothing
-        for k in OUTS:
+        for k in keep:
             del mm[k]
             os.remove(paths[k] + ".tmp.npy")
         log(f"limit run ok: {T}, agreement {agree}")
         return
-    for k in OUTS:
+    for k in keep:
         mm[k].flush()
         del mm[k]
         os.replace(paths[k] + ".tmp.npy", paths[k])
         model = k.split("_")[0]
         json.dump({"source": k, "map_shape": list(OUTS[k]), "gpu_s_per_exam": T[model] / ne,
-                   "prep_cpu_s_per_exam": T["prep"] / ne, "n_exams": ne, "rows": "drop_fold0",
+                   "prep_cpu_s_per_exam": T["prep"] / ne, "n_exams": ne, "rows": "all" if args.all_folds else "drop_fold0",
                    "crop_gland_agreement_min": min(agree), "crop_gland_agreement_mean": float(np.mean(agree)),
                    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"},
                   open(paths[k] + ".json", "w"), indent=1)

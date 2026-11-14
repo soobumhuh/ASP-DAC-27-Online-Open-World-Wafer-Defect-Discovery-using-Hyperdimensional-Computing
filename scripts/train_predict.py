@@ -21,6 +21,10 @@ def feature_maps(cfg, d):
     if feats in ("ssl3d", "ssl3d+rgb"):  # frozen self-supervised 3D encoder (scripts/ssl3d.py), optionally + ResNet
         ssl = np.load(cfg["model"]["feature_path"], mmap_mode="r")
         return ssl if feats == "ssl3d" else [Fe.resnet_l2_maps(d["images"], cfg["paths"]["feature_cache"]), ssl]
+    if feats == "external":  # frozen front end cached per slice on the crop grid (scripts/frontend_features.py --all-folds)
+        fm = np.load(cfg["model"]["feature_path"], mmap_mode="r")
+        assert len(fm) == len(d["fold"]), "external feature cache must cover all slices"
+        return fm
     if feats == "slices3":
         import torch
         prev, nxt = Fe.neighbour_slices(d)

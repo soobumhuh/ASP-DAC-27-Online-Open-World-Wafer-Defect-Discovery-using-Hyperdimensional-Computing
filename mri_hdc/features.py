@@ -90,8 +90,25 @@ def texture_maps(img: np.ndarray) -> np.ndarray:
     return np.stack(out).astype(np.float32)
 
 
+def pooled_bilinear(fm: np.ndarray, cy, cx, S: int) -> np.ndarray:
+    """Front-end adapter read-out (mri_hdc.frontend): 3 x 3 cell average (edge cells average the cells that exist)
+    then bilinear interpolation at the pixel-centre position u = (c + 0.5) h / S - 0.5. fm (C, h, w) -> (n, C)."""
+    C, h, w = fm.shape
+    p = np.pad(fm, ((0, 0), (1, 1), (1, 1)))
+    one = np.pad(np.ones((h, w), np.float32), 1)
+    acc = sum(p[:, dy:dy + h, dx:dx + w] for dy in range(3) for dx in range(3))
+    cnt = sum(one[dy:dy + h, dx:dx + w] for dy in range(3) for dx in range(3))
+    pm = acc / cnt
+    u = np.clip((cy + 0.5) * h / S - 0.5, 0, h - 1)
+    v = np.clip((cx + 0.5) * w / S - 0.5, 0, w - 1)
+    y0, x0 = np.minimum(u.astype(int), h - 2), np.minimum(v.astype(int), w - 2)
+    a, b = (u - y0)[None], (v - x0)[None]
+    return ((1 - a) * (1 - b) * pm[:, y0, x0] + (1 - a) * b * pm[:, y0, x0 + 1] + a * (1 - b) * pm[:, y0 + 1, x0]
+            + a * b * pm[:, y0 + 1, x0 + 1]).T
+
+
 def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.ndarray = None, stats: bool = True,
-                    context: tuple = None, pix: int = 0, tex: bool = False):
+                    context: tuple = None, pix: int = 0, tex: bool = False, readout: str = "nearest"):
     """Patches of slices idx whose centre lies in the gland. Descriptor per patch = [feature vector of fmaps at the
     patch centre] + [per-channel mean, per-channel std] (stats). With context = (prev, next) slice indices (2.5D),
     the same descriptor of the slices above and below at the same position is appended (3 x the length).
@@ -115,6 +132,9 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.nda
             im = img if j == i else d["images"][j].astype(np.float32)
             for fm in ([] if fmaps is None else fmaps if isinstance(fmaps, (list, tuple)) else [fmaps]):
                 fh = fm.shape[-1]  # several feature maps may have different grids (e.g. 28 x 28 and 24 x 24)
+                if readout == "pooled_bilinear":
+                    parts.append(pooled_bilinear(np.asarray(fm[j], dtype=np.float32), cy, cx, S))
+                    continue
                 fy = np.clip(((cy + 0.5) * fh / S).astype(int), 0, fh - 1)
                 fx = np.clip(((cx + 0.5) * fh / S).astype(int), 0, fh - 1)
                 parts.append(np.asarray(fm[j], dtype=np.float32)[:, fy, fx].T)

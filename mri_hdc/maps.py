@@ -113,11 +113,15 @@ class PatchModel:
         for k in ([] if given else ("train_normal", "train_pos", "val")):
             F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps, context=d.get("_context"),
                                             pix=m.get("pixels", 0), tex=m.get("texture", False),
-                                            stats=m.get("stats", True))
+                                            stats=m.get("stats", True), readout=m.get("readout", "nearest"))
             pat[k] = (F, sl, ys, xs, position_bins(d, sl, ys, xs, levels))
         # ablations: 'none' = one global memory; 'bound' = one global memory, position HV XOR-bound into each patch HV
         self.mode = m.get("bins", "position")
         log(" ".join(f"{k}: {len(v[0])} patches" for k, v in pat.items()) + f" ({time.time() - t0:.0f}s)")
+
+        if m.get("pca"):  # front-end adapter: PCA of the feature-map columns, fitted on this split's training patches
+            self._fit_pca(d, pat, m, seed, log)
+            pat = {k: (self._pca(v[0]),) + tuple(v[1:]) for k, v in pat.items()}
 
         # normal memory: scaler on all train normals, then a seeded cap per bin
         Ftr, btr = pat["train_normal"][0], pat["train_normal"][4]
@@ -184,6 +188,31 @@ class PatchModel:
         log(f"fit done ({time.time() - t0:.0f}s)")
         return self
 
+    def _fit_pca(self, d, pat, m, seed, log=print):
+        """Class-balanced sample (pca_sample, default 200k) of training patches: lesion = the label rule on csPCa-positive
+        slices, normal = csPCa-negative slices + clean (no lesion pixel) positive patches; the first pca_cols columns
+        (the feature map) are projected to min(pca, pca_cols) components; the remaining columns pass through."""
+        from .frontend import fit_pca
+        nc = int(m["pca_cols"])
+        Fp, slp, yp, xp = pat["train_pos"][:4]
+        frac = patch_fraction(d["lesion_mask"], slp, yp, xp, m["patch"])
+        les = frac >= m["lesion_frac"]
+        if m.get("lesion_rule") == "frac_or_centre":
+            les = les | (d["lesion_mask"][slp, yp, xp] > 0)
+        Fn = pat["train_normal"][0]
+        X = np.concatenate([Fn[:, :nc], Fp[:, :nc]])
+        is_l = np.r_[np.zeros(len(Fn), bool), les]
+        is_n = np.r_[np.ones(len(Fn), bool), frac == 0]
+        self.pca_mu, self.pca_V = fit_pca(X, is_l, is_n, n=m.get("pca_sample", 200_000), k=m["pca"], seed=seed)
+        self.pca_nc = nc
+        log(f"PCA {nc} -> {len(self.pca_V)} on {min(is_l.sum(), m.get('pca_sample', 200_000) // 2)} lesion + normal")
+
+    def _pca(self, F):
+        if getattr(self, "pca_V", None) is None:
+            return F
+        from .frontend import apply_pca
+        return np.concatenate([apply_pca(F[:, :self.pca_nc], self.pca_mu, self.pca_V), F[:, self.pca_nc:]], 1)
+
     def _sel(self, bins):
         """Memory index of each patch: its position bin, or 0 for a single global memory (ablations)."""
         return bins if getattr(self, "mode", "position") == "position" else np.zeros_like(bins)
@@ -203,7 +232,8 @@ class PatchModel:
     def patches(self, d: dict, fmaps: np.ndarray, idx: np.ndarray):
         F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps, context=d.get("_context"),
                                         pix=self.m.get("pixels", 0), tex=self.m.get("texture", False),
-                                        stats=self.m.get("stats", True))
+                                        stats=self.m.get("stats", True), readout=self.m.get("readout", "nearest"))
+        F = self._pca(F)
         return F, sl, ys, xs, position_bins(d, sl, ys, xs, self.m["slice_levels"])
 
     def patch_z(self, F: np.ndarray, bins: np.ndarray) -> np.ndarray:
