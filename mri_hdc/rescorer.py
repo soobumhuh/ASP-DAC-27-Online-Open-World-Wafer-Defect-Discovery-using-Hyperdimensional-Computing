@@ -93,8 +93,62 @@ class ZoneRescorer:
 
 
 def make(rc: dict, epochs: int):
-    """Re-scorer from the config's 'rescorer' section: extra fields (rescorer.fields: NUM + SYM) and / or zone split."""
+    """Re-scorer from the config's 'rescorer' section: extra fields (rescorer.fields: NUM + SYM) and / or zone split.
+    rescorer.kind 'knn' / 'hdc+knn' (idea 4): the tuning-grid value is k (rescorer.k_grid) and the prototype part
+    keeps rescorer.epochs (default 50)."""
     fields = (NUM + (SYM if rc.get("symmetry") else []) + list(rc.get("extra_fields", []))) \
         if (rc.get("symmetry") or rc.get("extra_fields")) else None
+    if rc.get("kind") in ("knn", "hdc+knn"):
+        return KNNRescorer(k=epochs, combine=rc["kind"] == "hdc+knn", zone_filter=rc.get("zone_filter", True),
+                           seed=rc.get("seed", 0), epochs=rc.get("epochs", 50), fields=fields)
     kw = dict(seed=rc.get("seed", 0), epochs=epochs, fields=fields)
     return ZoneRescorer(**kw) if rc.get("zone_split") else Rescorer(**kw)
+
+
+class KNNRescorer:
+    """Idea 4 (retrieval re-scorer, the HDC analogue of a detection head over a vector database): every training
+    candidate's record hypervector (the same HDDB record as Rescorer) is stored with its label (true / false
+    positive). A new candidate is scored by its k nearest stored records in Hamming distance, restricted to
+    candidates with the same zone at the peak (all candidates if that zone has fewer than k): score = (TPs among the
+    k + prior) / (k + 1), prior = the TP rate of the stored set. Exact brute-force search (D = 2,048 bits; the same
+    result as a Faiss IndexBinaryFlat). rank() places the score among the training candidates' leave-one-out
+    scores, as Rescorer does. combine = True: the rank is the mean of the kNN rank and the prototype re-scorer rank."""
+
+    def __init__(self, k: int = 20, combine: bool = False, zone_filter: bool = True, **kw):
+        self.k, self.combine, self.zone_filter = int(k), combine, zone_filter
+        self.base = Rescorer(**kw)
+
+    def _bip(self, cands):
+        return self.base.encode(cands).astype(np.float32) * 2 - 1
+
+    def _knn(self, Xq, zq, self_idx=None):
+        sim = Xq @ self.X.T  # D - 2 x Hamming distance
+        if self_idx is not None:
+            sim[np.arange(len(Xq)), self_idx] = -np.inf
+        out = np.empty(len(Xq))
+        for z in np.unique(zq):
+            q = np.where(zq == z)[0]
+            s = sim[q]
+            if self.zone_filter and (self.z == z).sum() > self.k:
+                s = np.where((self.z == z)[None, :], s, -np.inf)
+            nn = np.argpartition(-s, self.k, axis=1)[:, :self.k]
+            out[q] = (self.y[nn].sum(1) + self.prior) / (self.k + 1)
+        return out
+
+    def fit(self, cands):
+        self.base.fit(cands)
+        self.X = self._bip(cands)
+        self.y = np.array([int(c["tp"]) for c in cands], float)
+        self.z = np.array([c["feats"]["zone"] for c in cands])
+        self.prior = float(self.y.mean())
+        loo = np.concatenate([self._knn(self.X[i:i + 4096], self.z[i:i + 4096], np.arange(i, min(i + 4096, len(self.X))))
+                              for i in range(0, len(self.X), 4096)])
+        self.train_scores = np.sort(loo)
+        return self
+
+    def rank(self, cands):
+        s = self._knn(self._bip(cands), np.array([c["feats"]["zone"] for c in cands]))
+        r = (np.searchsorted(self.train_scores, s) + 0.5) / (len(self.train_scores) + 1)
+        return 0.5 * (r + self.base.rank(cands)) if self.combine else r
+
+    confidences = Rescorer.confidences

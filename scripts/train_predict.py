@@ -22,7 +22,11 @@ def feature_maps(cfg, d):
         ssl = np.load(cfg["model"]["feature_path"], mmap_mode="r")
         return ssl if feats == "ssl3d" else [Fe.resnet_l2_maps(d["images"], cfg["paths"]["feature_cache"]), ssl]
     if feats == "external":  # frozen front end cached per slice on the crop grid (scripts/frontend_features.py --all-folds)
-        fm = np.load(cfg["model"]["feature_path"], mmap_mode="r")
+        path = cfg["model"]["feature_path"]
+        if "{f}" in path:  # one front end per outer fold (e.g. self-supervised on the other folds' images only):
+            sp = cfg["_split"]  # fold<f> / nest<f><g> use the one without fold f; inner<v> (folds 1-4) the one without 0
+            path = path.format(f=int(sp[4]) if sp.startswith(("fold", "nest")) else 0)
+        fm = np.load(path, mmap_mode="r")
         assert len(fm) == len(d["fold"]), "external feature cache must cover all slices"
         return fm
     if feats == "slices3":
@@ -40,6 +44,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     cfg = load_config(args.config)
+    cfg["_split"] = args.split
     out = map_path(cfg, args.seed, args.split)
     if os.path.exists(out):
         print("exists:", out)

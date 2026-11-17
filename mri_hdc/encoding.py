@@ -70,3 +70,59 @@ def bipolar_int8(codes_u8: np.ndarray, D: int, block: int = 65536) -> np.ndarray
     for i in range(0, len(codes_u8), block):
         out[i:i + block] = unpack(codes_u8[i:i + block], D).astype(np.int8) * 2 - 1
     return out
+
+
+def learn_projection(Xn: np.ndarray, Xl: np.ndarray, W0: np.ndarray, kind: str, seed: int, log=print,
+                     n: int = 100_000, shrink: float = 0.1, steps: int = 400, lam: float = 1.0, batch: int = 1024,
+                     lr: float = 3e-3) -> np.ndarray:
+    """Idea A (label-guided projection, after ProViCNet's patch contrastive loss): replace the random projection
+    W0 (in_dim x num_proj) of the thermometer encoder by a linear map learned on one split's training patches
+    (prepared descriptors; Xn normal, Xl lesion), class-balanced sample of up to n / 2 each. The thermometer code,
+    the memories and everything downstream stay unchanged.
+      'lda'  within-class whitening: W = Sw^(-1/2) W0 with Sw the pooled within-class covariance (shrunk by
+             `shrink` towards its mean eigenvalue), so Hamming distance approximates the Mahalanobis distance of
+             LDA, in which the lesion-vs-normal direction is no longer drowned by high-variance normal directions.
+      'nca'  W initialised at W0 and trained by a supervised-contrastive (NCA) loss on the projected descriptors:
+             each patch's softmax over -||z_i - z_j||^2 / tau in a balanced batch should put its mass on patches of
+             its own class; + lam ||W - W0||^2 / ||W0||^2 keeps the random-projection geometry of the normals."""
+    rng = np.random.default_rng(seed + 777)
+    k = min(n // 2, len(Xn), len(Xl))
+    A = Xn[rng.choice(len(Xn), k, replace=False)].astype(np.float32)
+    B = Xl[rng.choice(len(Xl), k, replace=len(Xl) < k)].astype(np.float32)
+    if kind == "lda":
+        Sw = 0.5 * (np.cov(A, rowvar=False) + np.cov(B, rowvar=False))
+        ev, V = np.linalg.eigh(Sw)
+        ev = (1 - shrink) * np.maximum(ev, 1e-8) + shrink * ev.mean()
+        T = (V / np.sqrt(ev)) @ V.T
+        log(f"projection lda: within-class whitening, eigenvalues {ev.min():.3g} .. {ev.max():.3g}")
+        return (T @ W0).astype(np.float32)
+    if kind != "nca":
+        raise ValueError(kind)
+    import torch
+    torch.manual_seed(seed)
+    W0t = torch.from_numpy(W0.astype(np.float32))
+    W = torch.nn.Parameter(W0t.clone())
+    opt = torch.optim.Adam([W], lr=lr)
+    Xa, Xb = torch.from_numpy(A), torch.from_numpy(B)
+    y = torch.cat([torch.zeros(batch // 2), torch.ones(batch // 2)])
+    same = (y[:, None] == y[None, :]).float()
+    eye = torch.eye(batch, dtype=torch.bool)
+    with torch.no_grad():
+        z = torch.cat([Xa[:batch // 2], Xb[:batch // 2]]) @ W0t
+        tau = float(torch.cdist(z, z).pow(2).median())
+    g = torch.Generator().manual_seed(seed)
+    for t in range(steps):
+        i = torch.randint(0, k, (batch // 2,), generator=g)
+        j = torch.randint(0, k, (batch // 2,), generator=g)
+        z = torch.cat([Xa[i], Xb[j]]) @ W
+        logits = (-torch.cdist(z, z).pow(2) / tau).masked_fill(eye, -1e9)
+        logp = logits - torch.logsumexp(logits, 1, keepdim=True)
+        nca = -torch.logsumexp(logp.masked_fill(same == 0, -1e9).masked_fill(eye, -1e9), 1).mean()
+        reg = lam * (W - W0t).pow(2).sum() / W0t.pow(2).sum()
+        loss = nca + reg
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        if t % 100 == 0 or t == steps - 1:
+            log(f"projection nca step {t}: loss {nca.item():.4f} reg {reg.item():.4f}")
+    return W.detach().numpy().astype(np.float32)

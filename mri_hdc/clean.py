@@ -50,6 +50,8 @@ def run_cv_clean(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
     study_pid = {int(s): int(p) for s, p in zip(d["study_id"], d["patient_id"])}
     study_y = {int(s): int(c) for s, c in zip(d["study_id"], d["case_cspca"])}
     grid_ep, grid_a = rc.get("epochs_grid", [5, 20, 50]), rc.get("alpha_grid", [0.0, 0.1, 0.25, 0.5, 0.75])
+    if rc.get("kind") in ("knn", "hdc+knn"):  # retrieval re-scorer: the grid runs over k instead of epochs
+        grid_ep = rc.get("k_grid", [10, 20, 40])
     grid_w = cfg["patient"].get("merge_grid", [0.0, 0.1, 0.25, 0.5, 1.0, 2.0])
     rows, K = [], {}
     for f in folds:
@@ -80,7 +82,7 @@ def run_cv_clean(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
         aucs = {w: [] for w in grid_w}
         for g, m in inner.items():
             cs, y = _cases(sp, study_pid, study_y, f"nest{f}{g}")
-            cl = PT.clinical_scores(rows_ms, scan, cs, y, seed=10 * f + g, fields=fields)
+            cl = PT.clinical_scores(rows_ms, scan, cs, y, seed=10 * f + g, fields=fields, kind=cfg["patient"].get("kind", "binary"))
             ev = X.extract(m["val"], m["val"], pp, None, workers)
             iv = [max([c["conf"] for c in ev[k][0]], default=0.0) for k in cs["val"]]
             it = [max([c["conf"] for c in ext_in[g][k][0]], default=0.0) for k in cs["test"]]
@@ -88,7 +90,7 @@ def run_cv_clean(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
                 aucs[w].append(roc_auc_score(y["test"], PT.merge(iv, it, cl["val"], cl["test"], w)))
         w = max(grid_w, key=lambda x: (np.mean(aucs[x]), -x))
         cases, y = _cases(sp, study_pid, study_y, f"fold{f}")
-        clin = PT.clinical_scores(rows_ms, scan, cases, y, seed=f, fields=fields)
+        clin = PT.clinical_scores(rows_ms, scan, cases, y, seed=f, fields=fields, kind=cfg["patient"].get("kind", "binary"))
         ev = X.extract(mp["val"], mp["val"], pp, None, workers)
         img_val = [max([c["conf"] for c in ev[k][0]], default=0.0) for k in cases["val"]]
         img_test = [max(conf[k], default=0.0) for k in cases["test"]]
@@ -106,8 +108,8 @@ def run_cv_clean(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
             for k, v in r.items() if isinstance(v, dict) and "picai_score" in v), flush=True)
     stages = ["base", "rescore", "image_only", "merged"]
     res = {"per_fold": rows, "cv": {s: E.summary([r[s] for r in rows]) for s in stages} if len(rows) == 5 else None}
-    json.dump(res, open(out_path(cfg, "cv_clean.json"), "w"), indent=2)
-    pickle.dump(K, open(out_path(cfg, "cv_clean_cases.pkl"), "wb"))
+    json.dump(res, open(out_path(cfg, f"cv_clean{cfg.get('_tag', '')}.json"), "w"), indent=2)
+    pickle.dump(K, open(out_path(cfg, f"cv_clean{cfg.get('_tag', '')}_cases.pkl"), "wb"))
     if res["cv"]:
         lines = ["| stage | fold-0 AUROC / AP / PI-CAI | CV AUROC | CV lesion AP | CV PI-CAI |", "|---|---|---|---|---|"]
         for s in stages:
@@ -115,6 +117,6 @@ def run_cv_clean(cfg, folds=(0, 1, 2, 3, 4)) -> dict:
             lines.append(f"| {s} | {f0['patient_auroc']:.3f} / {f0['lesion_ap']:.3f} / {f0['picai_score']:.3f} | "
                          f"{cv['patient_auroc'][0]:.3f} ± {cv['patient_auroc'][1]:.3f} | {cv['lesion_ap'][0]:.3f} ± "
                          f"{cv['lesion_ap'][1]:.3f} | {cv['picai_score'][0]:.3f} ± {cv['picai_score'][1]:.3f} |")
-        open(out_path(cfg, "cv_clean.md"), "w").write("\n".join(lines) + "\n")
+        open(out_path(cfg, f"cv_clean{cfg.get('_tag', '')}.md"), "w").write("\n".join(lines) + "\n")
         print("\n".join(lines))
     return res

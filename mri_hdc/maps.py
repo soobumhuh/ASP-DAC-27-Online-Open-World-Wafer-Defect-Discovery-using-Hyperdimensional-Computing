@@ -28,7 +28,7 @@ from .memory import HDCPrototypeClassifier
 def prepare_slices(d: dict, m: dict) -> dict:
     """Model-specific view of the slice data. gland_dilate > 0: the AI gland mask is dilated in-plane by that many
     pixels, so patch centres and map values also cover tissue just outside it (lesions extending past the AI mask)."""
-    if m.get("context") == "25d":  # descriptors of the slices above and below are appended (2.5D)
+    if m.get("context") == "25d" or m.get("slice_context") == "perm":  # descriptors of the slices above / below
         from .features import neighbour_slices
         d = {**d, "_context": neighbour_slices(d)}
     k = int(m.get("gland_dilate", 0) or 0)
@@ -113,7 +113,8 @@ class PatchModel:
         for k in ([] if given else ("train_normal", "train_pos", "val")):
             F, sl, ys, xs = extract_patches(d, idx[k], P, m["stride"], fmaps, context=d.get("_context"),
                                             pix=m.get("pixels", 0), tex=m.get("texture", False),
-                                            stats=m.get("stats", True), readout=m.get("readout", "nearest"))
+                                            stats=m.get("stats", True), readout=m.get("readout", "nearest"),
+                                            dwi=int(m.get("dwi_nbhd", 0) or 0))
             pat[k] = (F, sl, ys, xs, position_bins(d, sl, ys, xs, levels))
         # ablations: 'none' = one global memory; 'bound' = one global memory, position HV XOR-bound into each patch HV
         self.mode = m.get("bins", "position")
@@ -124,9 +125,12 @@ class PatchModel:
             pat = {k: (self._pca(v[0]),) + tuple(v[1:]) for k, v in pat.items()}
 
         # normal memory: scaler on all train normals, then a seeded cap per bin
+        # slice_context 'perm': descriptors hold [slice z | z - 1 | z + 1] blocks; one scaler / encoder for all three
         Ftr, btr = pat["train_normal"][0], pat["train_normal"][4]
+        self.ctx = m.get("slice_context") == "perm"
+        self.nb = Ftr.shape[1] // 3 if self.ctx else Ftr.shape[1]
         pe = self.enc = PatchEncoder(m["num_proj"], m["num_levels"], m["clip_value"], seed,
-                                     groups=m.get("encoder_groups")).fit_scaler(Ftr)
+                                     groups=m.get("encoder_groups")).fit_scaler(Ftr[:, :self.nb])
         keep = np.zeros(len(Ftr), bool)
         cap_rng = np.random.default_rng(seed + 1)
         for b in np.unique(btr):
@@ -134,14 +138,9 @@ class PatchModel:
             if len(j) > m["bin_cap"]:
                 j = cap_rng.choice(j, m["bin_cap"], replace=False)
             keep[j] = True
-        Xtr, btr = pe.prep(Ftr[keep]), btr[keep]
-        pe.fit_hdc(Xtr)
+        Xtr, btr = self._prep(Ftr[keep]), btr[keep]
+        pe.fit_hdc(Xtr[:, :self.nb])
         D = pe.D
-        if self.mode == "bound":  # HDDB-style: position HV = level HV xor zone HV xor grid-cell HV
-            prng = np.random.default_rng(seed + 999)
-            Lh, Zh, Gh = (prng.integers(0, 2, (n, D), dtype=np.uint8) for n in (levels, 3, 9))
-            b = np.arange(NB)
-            self.poscodes = np.packbits(Lh[b // 27] ^ Zh[(b // 9) % 3] ^ Gh[b % 9], axis=1, bitorder="little")
 
         # lesion / clean labels on csPCa-positive training slices
         Fp, slp, yp, xp, bp = pat["train_pos"]
@@ -149,11 +148,24 @@ class PatchModel:
         les, clean = frac >= m["lesion_frac"], frac == 0
         if m.get("lesion_rule") == "frac_or_centre":  # small lesions: the patch centre inside a lesion also counts
             les = les | (d["lesion_mask"][slp, yp, xp] > 0)
-        C = {"n": self._codes(Xtr, btr), "l": self._codes(pe.prep(Fp[les]), bp[les])}
+        if m.get("projection"):  # idea A: label-guided projection learned on this split's training patches only
+            from .encoding import learn_projection
+            Xl0 = self._prep(Fp[les])[:, :self.nb]
+            pe.enc.W = learn_projection(Xtr[:, :self.nb], Xl0, pe.enc.W, m["projection"], seed, log=log,
+                                        **m.get("projection_kw", {}))
+            pe.enc.fit(Xtr[:, :self.nb])  # robust per-projection scaling recomputed on the normals
+            del Xl0
+        if self.mode == "bound":  # HDDB-style: position HV = level HV xor zone HV xor grid-cell HV
+            prng = np.random.default_rng(seed + 999)
+            Lh, Zh, Gh = (prng.integers(0, 2, (n, D), dtype=np.uint8) for n in (levels, 3, 9))
+            b = np.arange(NB)
+            self.poscodes = np.packbits(Lh[b // 27] ^ Zh[(b // 9) % 3] ^ Gh[b % 9], axis=1, bitorder="little")
+
+        C = {"n": self._codes(Xtr, btr), "l": self._codes(self._prep(Fp[les]), bp[les])}
         B = {"n": self._sel(btr), "l": self._sel(bp[les])}
         nl = np.where(clean)[0]
         nl = np.random.default_rng(seed + 2).choice(nl, min(len(nl), len(Xtr) // 2), replace=False)
-        C["n"] = np.concatenate([C["n"], self._codes(pe.prep(Fp[nl]), bp[nl])])
+        C["n"] = np.concatenate([C["n"], self._codes(self._prep(Fp[nl]), bp[nl])])
         B["n"] = np.concatenate([B["n"], self._sel(bp[nl])])
         log(f"memory: {len(C['n'])} normal, {len(C['l'])} lesion patch HVs, D = {D}")
 
@@ -179,7 +191,7 @@ class PatchModel:
 
         # per-bin z statistics from the validation csPCa-negative patches
         vb = self._sel(pat["val"][4])
-        sv = self.raw_scores(self._codes(pe.prep(pat["val"][0]), pat["val"][4]), vb)
+        sv = self.raw_scores(self._codes(self._prep(pat["val"][0]), pat["val"][4]), vb)
         vneg = d["case_cspca"][pat["val"][1]] == 0
         ref, rb = sv[vneg], vb[vneg]
         self.mu, self.sd = np.full(NB, ref.mean()), np.full(NB, ref.std() + 1e-6)
@@ -217,8 +229,20 @@ class PatchModel:
         """Memory index of each patch: its position bin, or 0 for a single global memory (ablations)."""
         return bins if getattr(self, "mode", "position") == "position" else np.zeros_like(bins)
 
+    def _prep(self, F):
+        if not getattr(self, "ctx", False):
+            return self.enc.prep(F)
+        n = self.nb
+        return np.concatenate([self.enc.prep(F[:, k * n:(k + 1) * n]) for k in range(3)], 1)
+
     def _codes(self, X, bins):
-        c = self.enc.codes(X)
+        if getattr(self, "ctx", False):  # idea 5: bundle(x_z, rho(x_z-1), rho^-1(x_z+1)), rho = cyclic shift by 8 bits
+            n = self.nb
+            a, b, e = (self.enc.codes(X[:, k * n:(k + 1) * n]) for k in range(3))
+            b, e = np.roll(b, 1, axis=1), np.roll(e, -1, axis=1)
+            c = (a & b) | (a & e) | (b & e)  # bitwise majority of three
+        else:
+            c = self.enc.codes(X)
         return c ^ self.poscodes[bins] if getattr(self, "mode", "position") == "bound" else c
 
     def raw_scores(self, codes: np.ndarray, bins: np.ndarray) -> np.ndarray:
@@ -232,14 +256,15 @@ class PatchModel:
     def patches(self, d: dict, fmaps: np.ndarray, idx: np.ndarray):
         F, sl, ys, xs = extract_patches(d, idx, self.m["patch"], self.m["stride"], fmaps, context=d.get("_context"),
                                         pix=self.m.get("pixels", 0), tex=self.m.get("texture", False),
-                                        stats=self.m.get("stats", True), readout=self.m.get("readout", "nearest"))
+                                        stats=self.m.get("stats", True), readout=self.m.get("readout", "nearest"),
+                                        dwi=int(self.m.get("dwi_nbhd", 0) or 0))
         F = self._pca(F)
         return F, sl, ys, xs, position_bins(d, sl, ys, xs, self.m["slice_levels"])
 
     def patch_z(self, F: np.ndarray, bins: np.ndarray) -> np.ndarray:
         """Descriptors -> hypervectors -> per-bin z-scored patch scores."""
         mb = self._sel(bins)
-        sc = self.raw_scores(self._codes(self.enc.prep(F), bins), mb)
+        sc = self.raw_scores(self._codes(self._prep(F), bins), mb)
         return (sc - self.mu[mb]) / self.sd[mb]
 
     def maps(self, d: dict, fmaps: np.ndarray, idx: np.ndarray) -> dict:
@@ -256,13 +281,17 @@ def train_and_map(d: dict, fmaps: np.ndarray, split: dict, m: dict, seed: int, l
     return (out, model) if return_model else out
 
 
-def ensemble(maps: list) -> dict:
-    """Average the z maps of models that differ only in their seed (same split)."""
+def ensemble(maps: list, weights: list = None) -> dict:
+    """Average the z maps of models of the same split (seeds, or different front ends; optionally weighted)."""
     out = {}
+    w = None if weights is None else np.asarray(weights, float) / np.sum(weights)
     for s in ("val", "test"):
         out[s] = {}
         for k, c in maps[0][s].items():
-            avg = np.mean([x[s][k]["map"].astype(np.float32) for x in maps], axis=0)
+            if w is None:  # plain mean (bit-identical to the earlier seed ensembles)
+                avg = np.mean([x[s][k]["map"].astype(np.float32) for x in maps], axis=0)
+            else:
+                avg = np.sum([wi * x[s][k]["map"].astype(np.float32) for wi, x in zip(w, maps)], axis=0)
             out[s][k] = {**{a: v for a, v in c.items() if a != "map"}, "map": avg.astype(np.float16)}
     return out
 

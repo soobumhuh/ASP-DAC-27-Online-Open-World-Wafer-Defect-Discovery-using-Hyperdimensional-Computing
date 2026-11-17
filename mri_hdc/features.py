@@ -108,10 +108,13 @@ def pooled_bilinear(fm: np.ndarray, cy, cx, S: int) -> np.ndarray:
 
 
 def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.ndarray = None, stats: bool = True,
-                    context: tuple = None, pix: int = 0, tex: bool = False, readout: str = "nearest"):
+                    context: tuple = None, pix: int = 0, tex: bool = False, readout: str = "nearest", dwi: int = 0):
     """Patches of slices idx whose centre lies in the gland. Descriptor per patch = [feature vector of fmaps at the
     patch centre] + [per-channel mean, per-channel std] (stats). With context = (prev, next) slice indices (2.5D),
     the same descriptor of the slices above and below at the same position is appended (3 x the length).
+    dwi = k > 0 (misalignment-tolerant DWI stats): the ADC image is min-filtered and the HBV image max-filtered over a
+    (2k + 1)^2 window; appended are their patch means and their values at the patch centre (= minimum ADC / maximum
+    HBV within +-k px of the centre), so a lesion shifted by up to k px between T2W and DWI still shows in the patch.
     Returns descriptors (n, D) float32, slice index, centre y, centre x."""
     S = d["images"].shape[-1]
     cs = patch_grid(S, P, stride)
@@ -148,6 +151,11 @@ def extract_patches(d: dict, idx: np.ndarray, P: int, stride: int, fmaps: np.nda
                 parts.append(tm[:, oy[:, :, None], ox[:, None, :]].mean(axis=(2, 3)).T)
             if stats:
                 parts += [pat.mean(axis=(2, 3)), pat.std(axis=(2, 3))]
+            if dwi:
+                from scipy.ndimage import maximum_filter, minimum_filter
+                ext = np.stack([minimum_filter(im[1], size=2 * dwi + 1, mode="nearest"),
+                                maximum_filter(im[2], size=2 * dwi + 1, mode="nearest")])
+                parts += [ext[:, oy[:, :, None], ox[:, None, :]].mean(axis=(2, 3)).T, ext[:, cy, cx].T]
         feats.append(np.concatenate(parts, axis=1).astype(np.float32))
         sl.append(np.full(len(cy), i)); ys.append(cy); xs.append(cx)
     cat = lambda a: np.concatenate(a).astype(np.int64) if a else np.zeros(0, np.int64)

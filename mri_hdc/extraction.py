@@ -56,7 +56,7 @@ def _extract(item):
                                              remove_adjacent_lesion_candidates=bool(p["adj"]))
     gt, _ = ndimage.label(c["lesion"] > 0)
     ring_st = np.ones((1, 7, 7), bool)  # 3 px in-plane ring
-    cands, dist = [], None
+    cands, dist, zb = [], None, None
     for k, cf in conf:
         K = idx == k
         if not K.any():  # a candidate fully overwritten by a later one (adj = False): nothing left to score
@@ -91,12 +91,29 @@ def _extract(item):
             if dist is None:  # in-plane px to the gland edge (once per exam)
                 dist = ndimage.distance_transform_edt(gland, sampling=(100, 1, 1))
             f["rim"] = float(np.median(dist[K]))
+            if zb is None:  # idea 7: signed in-plane px to the PZ/TZ boundary (+ in PZ, - in TZ), capped at 30
+                zb = zone_boundary_distance(c["zone"])
+            f["zb"] = float(np.median(zb[K]))
         cands.append({"conf": float(cf), "tp": iou >= 0.1, "feats": f, "mask": np.flatnonzero(K)})
     if p.get("gamma", 0) > 0 and cands:  # case gating (not used by the best setting)
         top = max(cd["conf"] for cd in cands)
         for cd in cands:
             cd["conf"] *= top ** p["gamma"]
     return key, cands, c["lesion"].shape
+
+
+def zone_boundary_distance(zone: np.ndarray, cap: float = 30.0) -> np.ndarray:
+    """(Z, S, S) AI zone mask (1 = PZ, 2 = TZ) -> signed in-plane distance (px) to the PZ/TZ interface of the same
+    slice: positive in the PZ, negative in the TZ, positive elsewhere; slices without an interface get +-cap."""
+    st = np.zeros((1, 3, 3), bool)
+    st[0] = True
+    pz, tz = zone == 1, zone == 2
+    itf = (pz & ndimage.binary_dilation(tz, st)) | (tz & ndimage.binary_dilation(pz, st))
+    out = np.full(zone.shape, cap, np.float32)
+    for z in range(zone.shape[0]):
+        if itf[z].any():
+            out[z] = np.minimum(ndimage.distance_transform_edt(~itf[z]), cap)
+    return np.where(tz, -out, out)
 
 
 def _init(pp):

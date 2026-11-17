@@ -53,6 +53,10 @@ def map_path(cfg, seed, split) -> str:
 
 def build_maps(cfg, names: list, seeds: list = None):
     """Map jobs (seed x split) not yet on disk, each in its own process, cfg.run.parallel_jobs at a time."""
+    if cfg.get("members"):  # idea 1: a map ensemble of models with different front ends (each its own config)
+        for c in cfg["members"]:
+            build_maps(load_config(c), names, seeds)
+        return
     seeds = cfg["ensemble_seeds"] if seeds is None else seeds
     splits(cfg)
     jobs = [(s, n) for s in seeds for n in names if not os.path.exists(map_path(cfg, s, n))]
@@ -77,7 +81,11 @@ def build_maps(cfg, names: list, seeds: list = None):
 def ensemble_maps(cfg, split) -> dict:
     p = out_path(cfg, "maps", "ens", f"{split}.pkl")
     if not os.path.exists(p):
-        M.save(M.ensemble([M.load(map_path(cfg, s, split)) for s in cfg["ensemble_seeds"]]), p)
+        if cfg.get("members"):  # mean of the members' seed-ensemble z maps (optionally weighted)
+            M.save(M.ensemble([ensemble_maps(load_config(c), split) for c in cfg["members"]],
+                              cfg.get("member_weights")), p)
+        else:
+            M.save(M.ensemble([M.load(map_path(cfg, s, split)) for s in cfg["ensemble_seeds"]]), p)
     return M.load(p)
 
 
