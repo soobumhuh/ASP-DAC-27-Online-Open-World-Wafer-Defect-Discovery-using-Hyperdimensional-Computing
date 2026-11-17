@@ -23,7 +23,7 @@ def one(item):
     files = A["files"][key]
     t2w = sitk.ReadImage(files["t2w"], sitk.sitkFloat32)
     adc = D.on_grid(sitk.ReadImage(files["adc"], sitk.sitkFloat32), t2w, False)
-    gl = D.on_grid(sitk.ReadImage(os.path.join(A["labels"], D.GLAND_DIR, key + ".nii.gz"), sitk.sitkUInt8), t2w, True) > 0
+    gl = D.read_anatomy(A["labels"], key, t2w)[0]
     y0, y1, x0, x1 = D.square_box(gl, 0.25, gl.shape)
     area = (y1 - y0) * (x1 - x0)
     kept = [z for z in range(gl.shape[0]) if gl[z, y0:y1, x0:x1].sum() >= 0.02 * area]

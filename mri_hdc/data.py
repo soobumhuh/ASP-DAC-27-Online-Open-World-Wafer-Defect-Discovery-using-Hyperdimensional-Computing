@@ -25,6 +25,31 @@ ZONE_DIR = "anatomical_delineations/zonal_pz_tz/AI/HeviAI23"
 AI_LESION_DIR = "csPCa_lesion_delineations/AI/Bosma22a"
 
 
+# AI anatomy source. None: the PI-CAI AI masks (Bosma22b gland, HeviAI23 zones). A directory: our own segmenter's label
+# maps <key>.nii.gz (1 = PZ, 2 = TZ, 3 = other gland; scripts/seg_dataset.py), e.g. out-of-fold nnU-Net predictions,
+# for exams that come without PI-CAI masks (hidden test, Prostate158). Set from the environment (MRI_SEG_DIR).
+SEG_DIR = os.environ.get("MRI_SEG_DIR") or None
+
+
+def read_anatomy(labels_dir: str, key: str, ref, seg_dir: str = None):
+    """(gland bool, zone uint8) on ref's grid, or (None, None) if the gland mask is missing."""
+    import SimpleITK as sitk
+    seg_dir = seg_dir or SEG_DIR
+    if seg_dir:
+        p = os.path.join(seg_dir, key + ".nii.gz")
+        if not os.path.exists(p):
+            return None, None
+        lab = on_grid(sitk.ReadImage(p, sitk.sitkUInt8), ref, True)
+        return lab > 0, np.where(lab == 3, 0, lab).astype(np.uint8)
+    gp = os.path.join(labels_dir, GLAND_DIR, key + ".nii.gz")
+    if not os.path.exists(gp):
+        return None, None
+    gland = on_grid(sitk.ReadImage(gp, sitk.sitkUInt8), ref, True) > 0
+    zp = os.path.join(labels_dir, ZONE_DIR, key + ".nii.gz")
+    zone = on_grid(sitk.ReadImage(zp, sitk.sitkUInt8), ref, True) if os.path.exists(zp) else np.zeros(gland.shape, np.uint8)
+    return gland, zone
+
+
 # ------------------------------------------------------------------ slice building
 def index_mha_files(images_dir: str) -> dict:
     """'<pid>_<sid>' -> {'t2w': path, 'adc': path, 'hbv': path}."""
@@ -112,19 +137,19 @@ def build_slices(images_dir: str, labels_dir: str, out_path: str, size: int = 96
             ai_p = os.path.join(labels_dir, AI_LESION_DIR, key + ".nii.gz")
             if os.path.exists(ai_p):
                 lesion_p, source = ai_p, 2
-        if not os.path.exists(gland_p) or (pos and lesion_p is None):
+        if (not SEG_DIR and not os.path.exists(gland_p)) or (pos and lesion_p is None):
             print("skip (missing mask):", key)
             continue
         t2w = sitk.ReadImage(seqs["t2w"], sitk.sitkFloat32)
         vols = [sitk.GetArrayFromImage(t2w)] + [on_grid(sitk.ReadImage(seqs[s], sitk.sitkFloat32), t2w, False)
                                                 for s in ("adc", "hbv")]
-        gland = on_grid(sitk.ReadImage(gland_p, sitk.sitkUInt8), t2w, True) > 0
+        gland, zone = read_anatomy(labels_dir, key, t2w)
+        if gland is None:
+            print("skip (missing gland mask):", key)
+            continue
         lesion = (on_grid(sitk.ReadImage(lesion_p, sitk.sitkUInt8), t2w, True) > 0) if lesion_p else np.zeros_like(gland)
-        zone = None
-        if zones:
-            zp = os.path.join(labels_dir, ZONE_DIR, key + ".nii.gz")
-            zone = on_grid(sitk.ReadImage(zp, sitk.sitkUInt8), t2w, True) if os.path.exists(zp) else \
-                np.zeros(gland.shape, np.uint8)
+        if not zones:
+            zone = None
         if gland.sum() < 100:
             print("skip (empty prostate mask):", key)
             continue
@@ -238,6 +263,43 @@ def nested_splits(npz_path: str) -> dict:
             sv = set(int(v) for v in val)
             out[f"nest{f}{g}"] = {"train": [int(q) for q in pool if int(q) not in sv], "val": sorted(sv),
                                   "test": [q for q in pats if fold[q] == g]}
+    return out
+
+
+def centre_splits(npz_path: str, marksheet: str) -> dict:
+    """Leave-one-centre-out splits (frozen-settings robustness check) and the final all-data split.
+    loco_<C>         train = the other two public centres (minus a seeded, csPCa-stratified 15% validation set,
+                     rng 300 + i), test = centre C
+    locoin_<C>_<D>   for the re-scorer's out-of-sample training candidates: train = the third centre (neither C nor D,
+                     minus 15% validation), test = centre D
+    final            train = all 1,500 exams minus a seeded, stratified 15% validation set (rng 400); test = 5 of the
+                     validation patients (placeholder: the final model is applied to external data separately)"""
+    d = np.load(npz_path, mmap_mode="r")
+    pos = {}
+    for p, c in zip(d["patient_id"], d["case_cspca"]):
+        pos[int(p)] = max(pos.get(int(p), 0), int(c))
+    centre = {int(r["patient_id"]): r["center"] for r in csv.DictReader(open(marksheet))}
+    pats = sorted(pos)
+    cs = sorted(set(centre[p] for p in pats))
+
+    def split(train_pool, test, seed):
+        pool = np.array(train_pool)
+        rng = np.random.default_rng(seed)
+        val = []
+        for flag in (0, 1):
+            g = pool[np.array([pos[q] == flag for q in pool])]
+            val += list(rng.permutation(g)[: int(round(0.15 * len(g)))])
+        sv = set(int(v) for v in val)
+        return {"train": [int(q) for q in pool if int(q) not in sv], "val": sorted(sv), "test": list(test)}
+    out = {}
+    for i, c in enumerate(cs):
+        out[f"loco_{c}"] = split([p for p in pats if centre[p] != c], [p for p in pats if centre[p] == c], 300 + i)
+        for j, dd in enumerate(x for x in cs if x != c):
+            e = [x for x in cs if x not in (c, dd)][0]
+            out[f"locoin_{c}_{dd}"] = split([p for p in pats if centre[p] == e], [p for p in pats if centre[p] == dd],
+                                            310 + 10 * i + j)
+    out["final"] = split(pats, [], 400)
+    out["final"]["test"] = out["final"]["val"][:5]
     return out
 
 

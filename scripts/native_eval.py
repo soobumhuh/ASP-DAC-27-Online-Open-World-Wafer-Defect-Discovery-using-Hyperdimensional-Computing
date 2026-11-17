@@ -34,7 +34,7 @@ def native_case(item):
     p = CFG
     files = p["files"][key]
     t2w = sitk.ReadImage(files["t2w"], sitk.sitkFloat32)
-    gl = D.on_grid(sitk.ReadImage(os.path.join(p["labels"], D.GLAND_DIR, key + ".nii.gz"), sitk.sitkUInt8), t2w, True) > 0
+    gl = D.read_anatomy(p["labels"], key, t2w)[0]  # the anatomy the slices were built with (MRI_SEG_DIR)
     y0, y1, x0, x1 = D.square_box(gl, 0.25, gl.shape)
     area = (y1 - y0) * (x1 - x0)
     kept = [z for z in range(gl.shape[0]) if gl[z, y0:y1, x0:x1].sum() >= 0.02 * area]
@@ -76,7 +76,8 @@ def main():
     CFG.update(files=D.index_mha_files(cfg["paths"]["images_dir"]), labels=cfg["paths"]["labels_dir"], pos=pos)
     out, KN = {"per_fold": []}, {}
     allr = {"lesion_results": {}, "case_target": {}, "case_pred": {}, "case_pred_det": {}}
-    for f in range(5):
+    folds = sorted({f for st, f in K if st == "candidates"}, key=str)  # 0-4, or e.g. centre names
+    for f in folds:
         cands = K[("candidates", f)]
         items = [(sid2key[k], shape, c) for k, (shape, c) in cands.items()]
         with get_context("fork").Pool(args.workers) as pool:
@@ -100,6 +101,12 @@ def main():
     for k in ("native", "native_det_case_score", "crop_grid"):
         out[k] = {m: [float(np.mean([r[k][m] for r in out["per_fold"]])), float(np.std([r[k][m] for r in out["per_fold"]]))]
                   for m in ("patient_auroc", "lesion_ap", "picai_score")}
+        mp = Metrics(lesion_results={f"{r}_{k2}": v for r in folds for k2, v in KN[(args.stage, r)]["lesion_results"].items()},
+                     case_target={f"{r}_{k2}": v for r in folds for k2, v in KN[(args.stage, r)]["case_target"].items()},
+                     case_pred={f"{r}_{k2}": v for r in folds for k2, v in KN[(args.stage, r)]["case_pred"].items()}) \
+            if k == "native" else None
+        if mp is not None:
+            out["native_pooled"] = {"patient_auroc": mp.auroc, "lesion_ap": mp.AP, "picai_score": (mp.auroc + mp.AP) / 2}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     if args.save_cases:
         pickle.dump(KN, open(args.save_cases, "wb"))

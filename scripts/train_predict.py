@@ -42,6 +42,7 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--split", required=True, help="fold0 .. fold4, inner1, inner2")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save_model", action="store_true")
     args = ap.parse_args()
     cfg = load_config(args.config)
     cfg["_split"] = args.split
@@ -51,8 +52,13 @@ def main():
         return
     d = M.prepare_slices(D.load_slices(cfg["paths"]["slices"]), cfg["model"])
     fmaps = feature_maps(cfg, d)
-    maps = M.train_and_map(d, fmaps, splits(cfg)[args.split], cfg["model"], args.seed,
-                           log=lambda s: print(s, flush=True))
+    maps, model = M.train_and_map(d, fmaps, splits(cfg)[args.split], cfg["model"], args.seed,
+                                  log=lambda s: print(s, flush=True), return_model=True)
+    if args.save_model or args.split == "final":  # the trained memories (e.g. the final all-data model, applied later to external exams)
+        import pickle
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out.replace(".pkl", "_model.pkl"), "wb") as fh:
+            pickle.dump(model, fh, protocol=4)
     M.save(maps, out)
     print("saved", out)
 

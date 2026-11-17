@@ -44,7 +44,13 @@ def splits(cfg) -> dict:
     if not os.path.exists(p):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         json.dump({**D.cv_splits(cfg["paths"]["slices"]), **D.nested_splits(cfg["paths"]["slices"])}, open(p, "w"))
-    return json.load(open(p))
+    sp = json.load(open(p))
+    if "final" not in sp:  # added later: leave-one-centre-out and final all-data splits (existing keys unchanged)
+        sp.update(D.centre_splits(cfg["paths"]["slices"],
+                                  os.path.join(cfg["paths"]["labels_dir"], "clinical_information", "marksheet.csv")))
+        json.dump(sp, open(p + ".tmp", "w"))
+        os.replace(p + ".tmp", p)
+    return sp
 
 
 def map_path(cfg, seed, split) -> str:

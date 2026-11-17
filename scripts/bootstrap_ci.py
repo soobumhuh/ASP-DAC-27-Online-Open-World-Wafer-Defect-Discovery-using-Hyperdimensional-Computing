@@ -43,24 +43,25 @@ def main():
         name, rest = r.split("=", 1)
         path, stage = rest.rsplit(":", 1)
         K = pickle.load(open(path if path.endswith(".pkl") else f"{path}/cv_cases.pkl", "rb"))  # or a native_eval --save-cases file
-        runs[name] = {f: K[(stage, f)] for f in range(5)}
+        runs[name] = {f: K[(stage, f)] for st, f in K if st == stage}  # folds 0-4, or e.g. centres
     rng = np.random.default_rng(0)
-    sizes = {f: len(runs[args.ref][f]["case_target"]) for f in range(5)}
+    F = sorted(runs[args.ref], key=str)
+    sizes = {f: len(runs[args.ref][f]["case_target"]) for f in F}
     for name in runs:  # the same exams in every run
-        assert all(sorted(runs[name][f]["case_target"]) == sorted(runs[args.ref][f]["case_target"]) for f in range(5))
-    point = {n: {"fold0": metrics(runs[n], [0], [np.arange(sizes[0])]),
-                 "cv_pooled": metrics(runs[n], range(5), [np.arange(sizes[f]) for f in range(5)])} for n in runs}
-    boot = {n: {"fold0": [], "cv_pooled": []} for n in runs}
+        assert all(sorted(runs[name][f]["case_target"]) == sorted(runs[args.ref][f]["case_target"]) for f in F)
+    parts = {"cv_pooled": F, **({"fold0": [0]} if 0 in F else {})}
+    point = {n: {p: metrics(runs[n], fs, [np.arange(sizes[f]) for f in fs]) for p, fs in parts.items()} for n in runs}
+    boot = {n: {p: [] for p in parts} for n in runs}
     for _ in range(args.n):
-        dr = [rng.integers(0, sizes[f], sizes[f]) for f in range(5)]
+        dr = {f: rng.integers(0, sizes[f], sizes[f]) for f in F}
         for n in runs:
-            boot[n]["fold0"].append(metrics(runs[n], [0], [dr[0]]))
-            boot[n]["cv_pooled"].append(metrics(runs[n], range(5), dr))
+            for p, fs in parts.items():
+                boot[n][p].append(metrics(runs[n], fs, [dr[f] for f in fs]))
     out = {}
     names = ["patient_auroc", "lesion_ap", "picai_score"]
     for n in runs:
         out[n] = {}
-        for part in ("fold0", "cv_pooled"):
+        for part in parts:
             b = np.array(boot[n][part])
             diff = b - np.array(boot[args.ref][part])
             out[n][part] = {m: {"value": float(point[n][part][i]),
