@@ -5,9 +5,9 @@ export nnUNet_raw=/data/auroc/nnunet/raw nnUNet_preprocessed=/data/auroc/nnunet/
 export nnUNet_n_proc_DA=8 OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=2
 cd /data/sota/nnunet
 for f in $(seq $1 $2 24); do
-  R=$nnUNet_results/Dataset503_PicaiLesionsNested/nnUNetTrainer_250epochs__nnUNetPlans__3d_fullres/fold_$f/validation/summary.json
+  R=$nnUNet_results/Dataset503_PicaiLesionsNested/nnUNetTrainerCELoss_250epochs__nnUNetPlans__3d_fullres/fold_$f/validation/summary.json
   [ -f $R ] && continue
-  C=""; [ -f $nnUNet_results/Dataset503_PicaiLesionsNested/nnUNetTrainer_250epochs__nnUNetPlans__3d_fullres/fold_$f/checkpoint_latest.pth ] && C="--c"
-  /data/sota/envs/nnunet/bin/python bin/train.py 503 3d_fullres $f -tr nnUNetTrainer_250epochs --npz $C > /data/auroc/nnunet/logs/f$f.log 2>&1
+  C=""; [ -f $nnUNet_results/Dataset503_PicaiLesionsNested/nnUNetTrainerCELoss_250epochs__nnUNetPlans__3d_fullres/fold_$f/checkpoint_latest.pth ] && C="--c"
+  /data/sota/envs/nnunet/bin/python /data/auroc/nnunet/train_ce.py 503 3d_fullres $f -tr nnUNetTrainerCELoss_250epochs --npz $C > /data/auroc/nnunet/logs/f$f.log 2>&1
 done
 echo done > /data/auroc/nnunet/worker$1.done

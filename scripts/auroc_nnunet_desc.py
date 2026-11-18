@@ -22,7 +22,7 @@ from multiprocessing import get_context
 import numpy as np
 from scipy import ndimage
 
-R = "/data/auroc/nnunet/results/Dataset503_PicaiLesionsNested/nnUNetTrainer_250epochs__nnUNetPlans__3d_fullres"
+R = "/data/auroc/nnunet/results/Dataset503_PicaiLesionsNested/nnUNetTrainerCELoss_250epochs__nnUNetPlans__3d_fullres"
 LABELS = "/data/picai_labels"
 ZONE_DIR = "anatomical_delineations/zonal_pz_tz/AI/HeviAI23"
 GLAND_DIR = "anatomical_delineations/whole_gland/AI/Bosma22b"
