@@ -29,7 +29,7 @@ import _path  # noqa: F401
 from mri_hdc import data as D
 from mri_hdc import frontend as FE
 
-CACHE = "mri_feature_cache"
+CACHE = os.environ.get("FE_CACHE", "mri_feature_cache")  # output dir
 W = "/data/weights/dl_tmp"
 PV_CKPT = {s: f"{W}/ProViCNet_hf/{s}_best.pth" for s in ("T2", "ADC", "DWI")}
 PF_CKPT = f"{W}/ProFound_weights/profound_alpha_checkpoint-799.pth"
@@ -51,12 +51,15 @@ def prep_case(job):
     t0 = time.time()
     pid, sid = key.split("_")
     seqs = {s: os.path.join(images_dir, pid, f"{key}_{s}.mha") for s in ("t2w", "adc", "hbv")}
+    fkey = key
+    if os.environ.get("FE_NIFTI_DIR"):  # external exams as nnU-Net inputs <key>_0000/1/2 (T2W, ADC, high-b DWI);
+        fkey = f"p158_{int(sid) - 9000000:03d}"  # Prostate158 (scripts/external_prostate158.py: study id 9000000 + ID)
+        seqs = {s: os.path.join(os.environ["FE_NIFTI_DIR"], f"{fkey}_{i:04d}.nii.gz") for i, s in enumerate(("t2w", "adc", "hbv"))}
     t2 = sitk.ReadImage(seqs["t2w"], sitk.sitkFloat32)
     vols = {"t2w": sitk.GetArrayFromImage(t2)}
     for s in ("adc", "hbv"):
         vols[s] = D.on_grid(sitk.ReadImage(seqs[s], sitk.sitkFloat32), t2, False)
-    gland = D.on_grid(sitk.ReadImage(os.path.join(labels_dir, D.GLAND_DIR, key + ".nii.gz"), sitk.sitkUInt8),
-                      t2, True) > 0
+    gland = D.read_anatomy(labels_dir, fkey, t2)[0]  # PI-CAI AI gland, or our segmenter's (MRI_SEG_DIR)
     Z, H, Wd = gland.shape
     sx, sy, sz = t2.GetSpacing()
     y0, y1, x0, x1 = D.square_box(gland, 0.25, gland.shape)

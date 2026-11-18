@@ -1,0 +1,79 @@
+# Evaluation (b): best_sota with gland + zone masks from our own nnU-Net segmenter (scripts/seg_dataset.py) instead of the
+# PI-CAI AI masks: every exam gets the out-of-fold prediction of the segmenter fold that never saw it. Slices, ResNet
+# cache and absolute-ADC crops rebuilt from those masks; everything else = configs/sota/best_sota.yaml.
+# Build: MRI_SEG_DIR=/data/sota/seg/oof uv run python scripts/build_data.py --config configs/sota/best_sota_seg.yaml
+# (every script that reads anatomy, incl. native_eval.py, needs MRI_SEG_DIR set)
+paths:
+  images_dir: /data/picai_images
+  labels_dir: /data/picai_labels
+  fold_lists: /data/picai_fold{f}_files.txt
+  fold_slices: /data/sota/seg/picai_fold{f}_seg.npz
+  slices: /data/sota/seg/picai_all_seg.npz
+  feature_cache: /data/sota/seg/resnet_l2.npy
+  out: results/sota/seg
+  adc_raw: /data/sota/seg/adc_raw.npy
+data:
+  size: 96
+model:
+  patch: 20
+  stride: 2
+  slice_levels: 5
+  num_proj: 512
+  num_levels: 4
+  clip_value: 4.0
+  n_sub:
+  - 20
+  - 5
+  epochs: 20
+  lr: 2.0
+  softmax_t: 0.02
+  lesion_frac: 0.25
+  bin_cap: 50000
+  smooth_sigma: 2.0
+ensemble_seeds:
+- 0
+- 1
+- 2
+extraction:
+  sxy: 0.0
+  sz: 1.0
+  q: 99.0
+  tf: 1.0
+  mapping: sigmoid
+  mode: dynamic-fast
+  factor: 2.0
+  minvox: 25
+  nles: 5
+  adj: false
+  conf: top10pct
+  gamma: 0.0
+rescorer:
+  seed: 0
+  epochs_grid:
+  - 50
+  alpha_grid:
+  - 0.25
+  - 0.5
+  extra_fields:
+  - a_mean
+  - a_p10
+  - rim
+  kind: hdc+knn
+  epochs: 50
+  k_grid:
+  - 20
+  - 40
+  - 80
+  - 160
+patient:
+  fields:
+  - psad
+  - psa
+  - prostate_volume
+  - patient_age
+  merge_grid:
+  - 0.25
+run:
+  parallel_jobs: 2
+  threads: 12
+  workers: 16
