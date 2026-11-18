@@ -36,7 +36,9 @@ ZONE = [f"z{z}_{s}" for z in (1, 2) for s in ("max", "q99", "top50", "vol2")]
 TISSUE_MAP = ["adc_top", "adc_rel", "hbv_rel"]       # under the map's most suspicious voxels (per family)
 TISSUE_IMG = ["adc_p5", "adc_p10", "hbv_p99"]        # image only (same for every family)
 CLIN = ["psad", "psa", "prostate_volume", "patient_age"]
-GROUPS = {"map": MAP, "zone": ZONE, "tissue": TISSUE_MAP, "maxonly": ["max"], "top": ["top50", "smax", "vol2"]}
+NN = ["nn_max", "nn_top10", "nn_top100", "nn_top1000", "nn_vol0.1", "nn_vol0.3", "nn_vol0.5", "nn_vol0.7", "nn_cc_max",
+      "nn_cc_n", "nn_smax", "nn_gland_mean", "nn_z1_max", "nn_z1_top100", "nn_z2_max", "nn_z2_top100"]  # nnU-Net detector
+GROUPS = {"nn": NN, "map": MAP, "zone": ZONE, "tissue": TISSUE_MAP, "maxonly": ["max"], "top": ["top50", "smax", "vol2"]}
 
 
 def ecdf(ref, x):
@@ -76,13 +78,14 @@ def features(desc_by_fam, split, grp, cases, fams, groups, clin):
     cols, names = [], []
     for i, fam in enumerate(fams):
         dd = desc_by_fam[fam][split]
-        fl = [n for g in groups if g in GROUPS for n in GROUPS[g]]
-        if "tissue" in groups and i == 0:
+        fl = [n for g in groups if g in GROUPS for n in GROUPS[g]
+              if n in next(iter(dd["test"].values()))]  # only the fields this family has
+        if "tissue" in groups and i == 0 and fam != "nnunet":
             fl = fl + TISSUE_IMG
         for n in fl:
             ref = np.array([dd["val"][c].get(n, np.nan) for c in dd["val"]], float)
             x = np.array([dd[grp][c].get(n, np.nan) for c in cases], float)
-            cols.append(ecdf(ref, x))
+            cols.append(ecdf(ref, x) if len(ref) else x)  # no validation group (nnU-Net): raw probabilities
             names.append(f"{fam}:{n}")
     if "clin" in groups:
         for n in CLIN:
