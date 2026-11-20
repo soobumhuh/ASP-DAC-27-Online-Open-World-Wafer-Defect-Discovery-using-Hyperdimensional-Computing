@@ -38,7 +38,7 @@ TISSUE_IMG = ["adc_p5", "adc_p10", "hbv_p99"]        # image only (same for ever
 CLIN = ["psad", "psa", "prostate_volume", "patient_age"]
 NN = ["nn_max", "nn_top10", "nn_top100", "nn_top1000", "nn_vol0.1", "nn_vol0.3", "nn_vol0.5", "nn_vol0.7", "nn_cc_max",
       "nn_cc_n", "nn_smax", "nn_gland_mean", "nn_z1_max", "nn_z1_top100", "nn_z2_max", "nn_z2_top100"]  # nnU-Net detector
-GROUPS = {"nn": NN, "map": MAP, "zone": ZONE, "tissue": TISSUE_MAP, "maxonly": ["max"], "top": ["top50", "smax", "vol2"]}
+GROUPS = {"triadp": ["triad_score"], "nn": NN, "map": MAP, "zone": ZONE, "tissue": TISSUE_MAP, "maxonly": ["max"], "top": ["top50", "smax", "vol2"]}
 
 
 def ecdf(ref, x):
