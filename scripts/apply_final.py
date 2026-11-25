@@ -106,6 +106,7 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5)
     ap.add_argument("--subset", default="", help="comma list of study ids for a subset row (e.g. Prostate158 test)")
     ap.add_argument("--n", type=int, default=1000)
+    ap.add_argument("--keymap", default="", help="json {key: {'study_id': ...}} for sets other than Prostate158")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -133,7 +134,10 @@ def main():
         tr += X.flat(X.extract(mp["test"], mp["val"], pp, dp, w))
     rs = make_rescorer(rc, a.k).fit(tr)
     conf = rs.confidences(ext, a.alpha)
-    sid2key = {9000000 + int(k.split("_")[1]): k for k in (f"p158_{i:03d}" for i in range(1, 1000))}
+    if a.keymap:
+        sid2key = {int(v["study_id"]): k for k, v in json.load(open(a.keymap)).items()}
+    else:
+        sid2key = {9000000 + int(k.split("_")[1]): k for k in (f"p158_{i:03d}" for i in range(1, 1000))}
     items = [(sid2key[s], shape, [(c["mask"], v) for c, v in zip(cands, conf[s])]) for s, (cands, shape) in ext.items()]
     G.update(t2={k: os.path.join(a.t2, k + "_0000.nii.gz") for _, (k) in sid2key.items()}, seg=a.seg, labels=a.labels)
     with get_context("fork").Pool(12) as pool:
@@ -152,6 +156,9 @@ def main():
         lr = {k: res[k][rd][0] for k in ks}
         ct = {k: res[k][rd][1] for k in ks}
         cpp = {k: cp[k] for k in ks}
+        if not any(ct.values()):  # no reference standard (e.g. an unlabelled export): scores only
+            print(name, "has no positive exams; metrics skipped", flush=True)
+            continue
         pt = metrics(lr, ct, cpp)
         b = np.array([metrics(lr, ct, cpp, rng.integers(0, len(ks), len(ks))) for _ in range(a.n)])
         out["rows"][name] = {"n": len(ks), "n_pos": int(sum(ct.values())),
@@ -160,6 +167,10 @@ def main():
         print(name, json.dumps(out["rows"][name]), flush=True)
     pickle.dump({"native": res, "case_pred": cp, "candidates": items}, open(os.path.join(a.out, "cases.pkl"), "wb"))
     json.dump(out, open(os.path.join(a.out, "result.json"), "w"), indent=2)
+    with open(os.path.join(a.out, "scores.csv"), "w") as f:
+        f.write("key,study_id,score,n_candidates\n")
+        for s, (cands, _) in sorted(ext.items()):
+            f.write(f"{sid2key[s]},{s},{max(conf[s], default=0.0):.6f},{len(cands)}\n")
 
 
 if __name__ == "__main__":
